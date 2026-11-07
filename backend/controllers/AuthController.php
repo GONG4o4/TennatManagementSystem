@@ -32,7 +32,7 @@ function authRegister(PDO $pdo, array $input): array
     $name = trim((string) ($input['name'] ?? ''));
     $email = strtolower(trim((string) ($input['email'] ?? '')));
     $password = (string) ($input['password'] ?? '');
-    $role = 'tenant';
+    $role = 'applicant';
 
     if (strlen($name) > 200 || count(preg_split('/\s+/u', $name, -1, PREG_SPLIT_NO_EMPTY) ?: []) < 2) {
         throw new ApiException(422, 'Enter both a first name and a last name.');

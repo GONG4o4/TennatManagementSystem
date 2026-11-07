@@ -1,6 +1,6 @@
 -- =====================================================================
 -- Landlord-Tenant Management System  |  MySQL / MariaDB schema (XAMPP friendly)
--- From Logical ERD v1 - 19 tables.
+-- From Logical ERD v1 - 25 tables.
 -- Requires: MariaDB 10.4+ (XAMPP) or MySQL 8.0.16+ (CHECK constraints enforced).
 -- Times are stored as DATETIME in UTC (MySQL has no TIMESTAMPTZ).
 -- =====================================================================
@@ -23,7 +23,7 @@ CREATE TABLE users (
     created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id),
     UNIQUE KEY users_email_uq (email),
-    CONSTRAINT users_role_chk   CHECK (role IN ('landlord', 'tenant')),
+    CONSTRAINT users_role_chk   CHECK (role IN ('landlord', 'applicant', 'tenant')),
     CONSTRAINT users_status_chk CHECK (account_status IN ('pending_verification', 'active', 'disabled')),
     CONSTRAINT users_email_chk  CHECK (CHAR_LENGTH(TRIM(email)) > 0 AND CHAR_LENGTH(email) = CHAR_LENGTH(TRIM(email))),
     CONSTRAINT users_hash_chk   CHECK (CHAR_LENGTH(TRIM(password_hash)) > 0)
@@ -71,6 +71,8 @@ CREATE TABLE property (
     property_type    VARCHAR(30)     NOT NULL,
     address          TEXT            NOT NULL,
     description      TEXT            NULL,
+    rental_classification VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    construction_date DATE           NULL,
     property_status  VARCHAR(20)     NOT NULL DEFAULT 'active',
     created_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (property_id),
@@ -78,6 +80,7 @@ CREATE TABLE property (
     CONSTRAINT property_landlord_fk FOREIGN KEY (landlord_id) REFERENCES landlord (landlord_id) ON DELETE RESTRICT,
     CONSTRAINT property_name_chk   CHECK (CHAR_LENGTH(TRIM(property_name)) > 0),
     CONSTRAINT property_type_chk   CHECK (property_type IN ('apartment', 'house', 'condo', 'townhouse', 'boarding_house', 'commercial', 'other')),
+    CONSTRAINT property_rental_classification_chk CHECK (rental_classification IN ('residential', 'commercial', 'unknown')),
     CONSTRAINT property_status_chk CHECK (property_status IN ('active', 'inactive', 'archived'))
 ) ENGINE=InnoDB;
 
@@ -200,6 +203,33 @@ CREATE TABLE screening_result (
 -- ---------------------------------------------------------------------
 -- LEASES
 -- ---------------------------------------------------------------------
+CREATE TABLE rental_regulation (
+    regulation_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    regulation_code VARCHAR(60) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    applies_to VARCHAR(20) NOT NULL,
+    monthly_rent_ceiling DECIMAL(12,2) NULL,
+    annual_increase_percent DECIMAL(5,2) NULL,
+    max_advance_months DECIMAL(4,2) NULL,
+    max_security_deposit_months DECIMAL(4,2) NULL,
+    same_lessee_required BOOLEAN NOT NULL DEFAULT FALSE,
+    new_construction_cutoff DATE NULL,
+    effective_from DATE NULL,
+    effective_to DATE NULL,
+    source_url VARCHAR(500) NULL,
+    verification_status VARCHAR(30) NOT NULL DEFAULT 'requires_manual_verification',
+    PRIMARY KEY (regulation_id),
+    UNIQUE KEY rental_regulation_code_uq (regulation_code),
+    KEY idx_rental_regulation_dates (effective_from, effective_to),
+    CONSTRAINT rental_regulation_applies_chk CHECK (applies_to IN ('residential', 'all')),
+    CONSTRAINT rental_regulation_rent_chk CHECK (monthly_rent_ceiling IS NULL OR monthly_rent_ceiling >= 0),
+    CONSTRAINT rental_regulation_increase_chk CHECK (annual_increase_percent IS NULL OR annual_increase_percent >= 0),
+    CONSTRAINT rental_regulation_advance_chk CHECK (max_advance_months IS NULL OR max_advance_months >= 0),
+    CONSTRAINT rental_regulation_deposit_chk CHECK (max_security_deposit_months IS NULL OR max_security_deposit_months >= 0),
+    CONSTRAINT rental_regulation_dates_chk CHECK (effective_to IS NULL OR effective_from IS NULL OR effective_to >= effective_from),
+    CONSTRAINT rental_regulation_verification_chk CHECK (verification_status IN ('verified', 'requires_manual_verification'))
+) ENGINE=InnoDB;
+
 CREATE TABLE lease (
     lease_id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     application_id    BIGINT UNSIGNED NOT NULL,              -- 1 : 0..1
@@ -210,6 +240,9 @@ CREATE TABLE lease (
     security_deposit  DECIMAL(12,2)   NOT NULL DEFAULT 0,
     advance_payment   DECIMAL(12,2)   NOT NULL DEFAULT 0,
     payment_due_day   SMALLINT        NOT NULL DEFAULT 1,
+    regulation_id     BIGINT UNSIGNED NULL,
+    compliance_status VARCHAR(40)     NOT NULL DEFAULT 'requires_manual_verification',
+    compliance_assessment TEXT        NULL,
     lease_status      VARCHAR(20)     NOT NULL DEFAULT 'pending',
     created_at        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (lease_id),
@@ -218,11 +251,13 @@ CREATE TABLE lease (
     KEY idx_lease_status (lease_status),
     CONSTRAINT lease_application_fk FOREIGN KEY (application_id) REFERENCES tenant_application (application_id) ON DELETE RESTRICT,
     CONSTRAINT lease_unit_fk        FOREIGN KEY (unit_id)        REFERENCES rental_unit (unit_id) ON DELETE RESTRICT,
+    CONSTRAINT lease_regulation_fk  FOREIGN KEY (regulation_id) REFERENCES rental_regulation (regulation_id) ON DELETE RESTRICT,
     CONSTRAINT lease_dates_chk   CHECK (lease_end_date > lease_start_date),
     CONSTRAINT lease_rent_chk    CHECK (monthly_rent > 0),
     CONSTRAINT lease_deposit_chk CHECK (security_deposit >= 0),
     CONSTRAINT lease_advance_chk CHECK (advance_payment  >= 0),
-    CONSTRAINT lease_due_day_chk CHECK (payment_due_day BETWEEN 1 AND 28),
+    CONSTRAINT lease_due_day_chk   CHECK (payment_due_day BETWEEN 1 AND 31),
+    CONSTRAINT lease_compliance_status_chk CHECK (compliance_status IN ('compliant', 'not_covered', 'requires_manual_verification')),
     CONSTRAINT lease_status_chk  CHECK (lease_status IN ('pending', 'active', 'ended', 'terminated', 'cancelled'))
 ) ENGINE=InnoDB;
 
@@ -246,6 +281,92 @@ CREATE TABLE lease_tenant (
     CONSTRAINT lt_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenant (tenant_id) ON DELETE RESTRICT,
     CONSTRAINT lt_type_chk  CHECK (tenant_type IN ('primary', 'co_tenant')),
     CONSTRAINT lt_dates_chk CHECK (left_at IS NULL OR left_at >= joined_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE lease_deposit (
+    deposit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lease_id BIGINT UNSIGNED NOT NULL,
+    original_amount DECIMAL(12,2) NOT NULL,
+    received_date DATE NULL,
+    bank_deposit_date DATE NULL,
+    bank_account_reference VARCHAR(255) NULL,
+    accrued_interest DECIMAL(12,2) NOT NULL DEFAULT 0,
+    refund_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+    refund_date DATE NULL,
+    settlement_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (deposit_id),
+    UNIQUE KEY lease_deposit_lease_uq (lease_id),
+    CONSTRAINT lease_deposit_lease_fk FOREIGN KEY (lease_id) REFERENCES lease (lease_id) ON DELETE RESTRICT,
+    CONSTRAINT lease_deposit_amount_chk CHECK (original_amount >= 0),
+    CONSTRAINT lease_deposit_interest_chk CHECK (accrued_interest >= 0),
+    CONSTRAINT lease_deposit_refund_chk CHECK (refund_amount >= 0),
+    CONSTRAINT lease_deposit_status_chk CHECK (settlement_status IN ('pending', 'held', 'partially_refunded', 'refunded', 'settled'))
+) ENGINE=InnoDB;
+
+CREATE TABLE lease_deposit_deduction (
+    deduction_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    deposit_id BIGINT UNSIGNED NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    basis VARCHAR(30) NOT NULL,
+    reason TEXT NOT NULL,
+    supporting_document_ref VARCHAR(500) NOT NULL,
+    authorized_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    authorized_by BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (deduction_id),
+    KEY idx_deposit_deduction_deposit (deposit_id),
+    CONSTRAINT deposit_deduction_deposit_fk FOREIGN KEY (deposit_id) REFERENCES lease_deposit (deposit_id) ON DELETE RESTRICT,
+    CONSTRAINT deposit_deduction_user_fk FOREIGN KEY (authorized_by) REFERENCES users (user_id) ON DELETE RESTRICT,
+    CONSTRAINT deposit_deduction_amount_chk CHECK (amount > 0),
+    CONSTRAINT deposit_deduction_basis_chk CHECK (basis IN ('unpaid_obligation', 'damage')),
+    CONSTRAINT deposit_deduction_reason_chk CHECK (CHAR_LENGTH(TRIM(reason)) > 0),
+    CONSTRAINT deposit_deduction_evidence_chk CHECK (CHAR_LENGTH(TRIM(supporting_document_ref)) > 0)
+) ENGINE=InnoDB;
+
+CREATE TABLE rent_increase_history (
+    rent_increase_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lease_id BIGINT UNSIGNED NOT NULL,
+    previous_monthly_rent DECIMAL(12,2) NOT NULL,
+    proposed_monthly_rent DECIMAL(12,2) NOT NULL,
+    approved_monthly_rent DECIMAL(12,2) NULL,
+    increase_percent DECIMAL(7,4) NOT NULL,
+    effective_date DATE NOT NULL,
+    regulation_id BIGINT UNSIGNED NULL,
+    approval_date DATE NULL,
+    reason TEXT NOT NULL,
+    assessment_status VARCHAR(40) NOT NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (rent_increase_id),
+    KEY idx_rent_increase_lease_date (lease_id, effective_date),
+    CONSTRAINT rent_increase_lease_fk FOREIGN KEY (lease_id) REFERENCES lease (lease_id) ON DELETE RESTRICT,
+    CONSTRAINT rent_increase_regulation_fk FOREIGN KEY (regulation_id) REFERENCES rental_regulation (regulation_id) ON DELETE RESTRICT,
+    CONSTRAINT rent_increase_user_fk FOREIGN KEY (created_by) REFERENCES users (user_id) ON DELETE RESTRICT,
+    CONSTRAINT rent_increase_previous_chk CHECK (previous_monthly_rent > 0),
+    CONSTRAINT rent_increase_proposed_chk CHECK (proposed_monthly_rent > 0),
+    CONSTRAINT rent_increase_approved_chk CHECK (approved_monthly_rent IS NULL OR approved_monthly_rent > 0),
+    CONSTRAINT rent_increase_percent_chk CHECK (increase_percent >= 0),
+    CONSTRAINT rent_increase_status_chk CHECK (assessment_status IN ('approved', 'not_covered', 'requires_manual_verification'))
+) ENGINE=InnoDB;
+
+CREATE TABLE lease_notice (
+    notice_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lease_id BIGINT UNSIGNED NOT NULL,
+    notice_type VARCHAR(40) NOT NULL,
+    notice_date DATE NOT NULL,
+    recipient VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    legal_ground VARCHAR(80) NULL,
+    written_sublease_consent BOOLEAN NOT NULL DEFAULT FALSE,
+    supporting_document_ref VARCHAR(500) NULL,
+    recorded_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (notice_id),
+    KEY idx_lease_notice_lease_date (lease_id, notice_date),
+    CONSTRAINT lease_notice_lease_fk FOREIGN KEY (lease_id) REFERENCES lease (lease_id) ON DELETE RESTRICT,
+    CONSTRAINT lease_notice_user_fk FOREIGN KEY (recorded_by) REFERENCES users (user_id) ON DELETE RESTRICT,
+    CONSTRAINT lease_notice_type_chk CHECK (notice_type IN ('tenant_notice', 'payment_demand', 'lease_expiration', 'lease_termination', 'sublease_consent', 'other')),
+    CONSTRAINT lease_notice_ground_chk CHECK (legal_ground IS NULL OR legal_ground IN ('unauthorized_sublease', 'rent_arrears', 'owner_or_family_use', 'necessary_repairs', 'lease_expiration', 'other'))
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -303,6 +424,9 @@ CREATE TABLE payment (
     payment_id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     attempt_id             BIGINT UNSIGNED NOT NULL,         -- 1 : 0..1
     amount_paid            DECIMAL(12,2)   NOT NULL,
+    refunded_amount        DECIMAL(12,2)   NOT NULL DEFAULT 0,
+    refund_date            DATE            NULL,
+    refund_reason          TEXT            NULL,
     transaction_reference  VARCHAR(100)    NOT NULL,
     receipt_number         VARCHAR(50)     NOT NULL,
     payment_status         VARCHAR(20)     NOT NULL DEFAULT 'completed',
@@ -313,7 +437,23 @@ CREATE TABLE payment (
     UNIQUE KEY receipt_number_uq (receipt_number),
     CONSTRAINT pay_attempt_fk FOREIGN KEY (attempt_id) REFERENCES payment_attempt (attempt_id) ON DELETE RESTRICT,
     CONSTRAINT pay_amount_chk CHECK (amount_paid > 0),
+    CONSTRAINT payment_refund_amount_chk CHECK (refunded_amount >= 0 AND refunded_amount <= amount_paid),
     CONSTRAINT pay_status_chk CHECK (payment_status IN ('completed', 'refunded', 'reversed'))
+) ENGINE=InnoDB;
+
+CREATE TABLE payment_refund (
+    refund_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    payment_id BIGINT UNSIGNED NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    reason TEXT NOT NULL,
+    refunded_by BIGINT UNSIGNED NULL,
+    refunded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (refund_id),
+    KEY idx_payment_refund_payment_date (payment_id, refunded_at),
+    CONSTRAINT payment_refund_payment_fk FOREIGN KEY (payment_id) REFERENCES payment (payment_id) ON DELETE RESTRICT,
+    CONSTRAINT payment_refund_user_fk FOREIGN KEY (refunded_by) REFERENCES users (user_id) ON DELETE SET NULL,
+    CONSTRAINT payment_refund_amount_chk CHECK (amount > 0),
+    CONSTRAINT payment_refund_reason_chk CHECK (CHAR_LENGTH(TRIM(reason)) > 0)
 ) ENGINE=InnoDB;
 
 CREATE TABLE expense (
@@ -389,6 +529,18 @@ CREATE TABLE audit_log (
     CONSTRAINT audit_user_fk FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
+INSERT INTO rental_regulation
+    (regulation_code, title, applies_to, monthly_rent_ceiling, annual_increase_percent,
+     max_advance_months, max_security_deposit_months, same_lessee_required,
+     new_construction_cutoff, effective_from, effective_to, source_url, verification_status)
+VALUES
+    ('RA9653-SEC7', 'Republic Act No. 9653, Section 7', 'residential', NULL, NULL,
+     1, 2, FALSE, NULL, NULL, NULL,
+     'https://lawphil.net/statutes/repacts/ra2009/ra_9653_2009.html', 'verified'),
+    ('NHSB-2024-01', 'NHSB Resolution No. 2024-01 (2025-2026 rent increase cap)', 'residential',
+     10000, 1, NULL, NULL, TRUE, NULL, '2025-01-01', '2026-12-31',
+     NULL, 'requires_manual_verification');
+
 -- ---------------------------------------------------------------------
 -- TRIGGERS: rules that a CHECK or FK cannot express
 -- (phpMyAdmin: import this file as-is; in the SQL tab, set the Delimiter box to //)
@@ -401,6 +553,18 @@ CREATE PROCEDURE sp_assert_landlord_user(IN p_user_id BIGINT UNSIGNED)
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM users WHERE user_id = p_user_id AND role = 'landlord') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'The referenced user must have the landlord role';
+    END IF;
+END//
+
+CREATE PROCEDURE sp_assert_tenant_role_approved(IN p_user_id BIGINT UNSIGNED)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM tenant t
+        JOIN tenant_application a ON a.tenant_id = t.tenant_id
+        WHERE t.user_id = p_user_id AND a.application_status = 'approved'
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A user must have a landlord-approved application before becoming a tenant';
     END IF;
 END//
 
@@ -454,6 +618,38 @@ CREATE TRIGGER screening_role_ins BEFORE INSERT ON screening
 FOR EACH ROW BEGIN CALL sp_assert_landlord_user(NEW.screened_by); END//
 CREATE TRIGGER screening_role_upd BEFORE UPDATE ON screening
 FOR EACH ROW BEGIN CALL sp_assert_landlord_user(NEW.screened_by); END//
+
+CREATE TRIGGER users_tenant_role_ins BEFORE INSERT ON users
+FOR EACH ROW BEGIN
+    IF NEW.role = 'tenant' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Create the account as an applicant; landlord approval grants tenant role';
+    END IF;
+END//
+CREATE TRIGGER users_tenant_role_upd BEFORE UPDATE ON users
+FOR EACH ROW BEGIN
+    IF NEW.role = 'tenant' AND OLD.role <> 'tenant' THEN
+        CALL sp_assert_tenant_role_approved(NEW.user_id);
+    END IF;
+END//
+
+CREATE TRIGGER applicant_approved_ins AFTER INSERT ON tenant_application
+FOR EACH ROW BEGIN
+    IF NEW.application_status = 'approved' THEN
+        UPDATE users u
+        JOIN tenant t ON t.user_id = u.user_id
+        SET u.role = 'tenant'
+        WHERE t.tenant_id = NEW.tenant_id AND u.role = 'applicant';
+    END IF;
+END//
+CREATE TRIGGER applicant_approved_upd AFTER UPDATE ON tenant_application
+FOR EACH ROW BEGIN
+    IF NEW.application_status = 'approved' THEN
+        UPDATE users u
+        JOIN tenant t ON t.user_id = u.user_id
+        SET u.role = 'tenant'
+        WHERE t.tenant_id = NEW.tenant_id AND u.role = 'applicant';
+    END IF;
+END//
 
 CREATE TRIGGER expense_role_ins BEFORE INSERT ON expense
 FOR EACH ROW BEGIN CALL sp_assert_landlord_user(NEW.recorded_by); END//

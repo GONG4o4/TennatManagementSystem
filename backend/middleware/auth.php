@@ -83,6 +83,7 @@ function authenticatedUser(PDO $pdo): array
         || !ctype_digit((string) $claims['sub'])
         || !is_int($claims['exp'])
         || $claims['exp'] <= time()
+        || !in_array($claims['role'] ?? null, ['landlord', 'applicant', 'tenant'], true)
     ) {
         throw new ApiException(401, 'The access token is invalid or expired.');
     }
@@ -93,7 +94,7 @@ function authenticatedUser(PDO $pdo): array
     $statement->execute(['user_id' => $claims['sub']]);
     $user = $statement->fetch();
 
-    if (!$user || $user['account_status'] !== 'active' || $user['role'] !== ($claims['role'] ?? null)) {
+    if (!$user || $user['account_status'] !== 'active') {
         throw new ApiException(401, 'The account is unavailable or the access token is invalid.');
     }
 

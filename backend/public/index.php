@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/config/bootstrap.php';
 require_once dirname(__DIR__) . '/config/database.php';
 require_once dirname(__DIR__) . '/middleware/auth.php';
+require_once dirname(__DIR__) . '/services/rentalCompliance.php';
 require_once dirname(__DIR__) . '/controllers/AuthController.php';
 require_once dirname(__DIR__) . '/controllers/ApiController.php';
 require_once dirname(__DIR__) . '/routes/api.php';

@@ -43,8 +43,16 @@ body {
     @apply inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700;
   }
 
+  .primary-btn:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
   .secondary-btn {
     @apply inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50;
+  }
+
+  .secondary-btn:disabled {
+    @apply cursor-not-allowed opacity-50;
   }
 
   .status-badge {

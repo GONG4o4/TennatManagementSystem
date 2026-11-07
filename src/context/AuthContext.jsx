@@ -15,7 +15,7 @@ export function AuthProvider({ children }) {
       }
 
       const parsed = JSON.parse(storedUser);
-      if (!['landlord', 'tenant'].includes(parsed.role)) {
+      if (!['landlord', 'applicant', 'tenant'].includes(parsed.role)) {
         localStorage.removeItem('tenant_app_user');
         localStorage.removeItem('tenant_app_token');
         return null;
@@ -30,8 +30,8 @@ export function AuthProvider({ children }) {
   const acceptSession = (payload) => {
     const userPayload = payload?.user;
     const token = payload?.accessToken || payload?.token;
-    if (!userPayload || !['landlord', 'tenant'].includes(userPayload.role) || !token) {
-      throw new Error('The authentication response must include a valid landlord/tenant account and access token.');
+    if (!userPayload || !['landlord', 'applicant', 'tenant'].includes(userPayload.role) || !token) {
+      throw new Error('The authentication response must include a valid account role and access token.');
     }
 
     localStorage.setItem('tenant_app_user', JSON.stringify(userPayload));
@@ -64,8 +64,14 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const syncUser = (userPayload) => {
+    if (!userPayload || !['landlord', 'applicant', 'tenant'].includes(userPayload.role)) return;
+    localStorage.setItem('tenant_app_user', JSON.stringify(userPayload));
+    setUser(userPayload);
+  };
+
   const value = useMemo(
-    () => ({ user, isLoading, login, register, logout }),
+    () => ({ user, isLoading, login, register, logout, syncUser }),
     [user, isLoading],
   );
 

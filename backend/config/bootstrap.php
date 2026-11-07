@@ -25,15 +25,18 @@ if (is_file($envFile)) {
             && ($environmentValue === false
                 || strlen($environmentValue) < 32
                 || str_starts_with($environmentValue, 'replace_with_'));
-        if ($environmentValue === false || $invalidEnvironmentKey) {
-            putenv($key . '=' . $value);
-            $_ENV[$key] = $value;
-        }
+        $_ENV[$key] = $environmentValue === false || $invalidEnvironmentKey
+            ? $value
+            : $environmentValue;
     }
 }
 
 function appEnv(string $name, string $default = ''): string
 {
+    if (isset($_ENV[$name])) {
+        return (string) $_ENV[$name];
+    }
+
     $value = getenv($name);
     return $value === false ? $default : $value;
 }

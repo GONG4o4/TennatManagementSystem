@@ -116,6 +116,42 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
         return leaseList($pdo, $user);
     }
 
+    if ($method === 'GET' && $path === '/api/rental-regulations') {
+        return rentalRegulationList($pdo, $user);
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/leases/(\d+)/agreement$#', $path, $matches) === 1) {
+        return leaseAgreementDataGet($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/leases/(\d+)/deposit$#', $path, $matches) === 1) {
+        return leaseDepositGet($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'PATCH' && preg_match('#^/api/leases/(\d+)/deposit$#', $path, $matches) === 1) {
+        return leaseDepositUpdate($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/leases/(\d+)/deposit/deductions$#', $path, $matches) === 1) {
+        return leaseDepositDeductionCreate($pdo, $user, (int) $matches[1], requestJson());
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/leases/(\d+)/rent-increases$#', $path, $matches) === 1) {
+        return leaseRentIncreaseList($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/leases/(\d+)/rent-increases$#', $path, $matches) === 1) {
+        return leaseRentIncreaseCreate($pdo, $user, (int) $matches[1], requestJson());
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/leases/(\d+)/notices$#', $path, $matches) === 1) {
+        return leaseNoticeList($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/leases/(\d+)/notices$#', $path, $matches) === 1) {
+        return leaseNoticeCreate($pdo, $user, (int) $matches[1], requestJson());
+    }
+
     if ($method === 'POST' && $path === '/api/leases') {
         return leaseCreate($pdo, $user, requestJson());
     }
@@ -150,6 +186,18 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
 
     if ($method === 'POST' && $path === '/api/payments/initiate') {
         return paymentInitiate($pdo, $user, requestJson());
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/payments/(\d+)/confirm$#', $path, $matches) === 1) {
+        return paymentConfirm($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/payments/(\d+)/cancel$#', $path, $matches) === 1) {
+        return paymentAttemptCancel($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/payments/(\d+)/refund$#', $path, $matches) === 1) {
+        return paymentRefund($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
     }
 
     if ($method === 'GET' && preg_match('#^/api/payments/(\d+)/status$#', $path, $matches) === 1) {

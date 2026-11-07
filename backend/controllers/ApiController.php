@@ -40,6 +40,22 @@ function tenantIdForUser(PDO $pdo, array $user): int
     return (int) $tenant['tenant_id'];
 }
 
+function applicantTenantIdForUser(PDO $pdo, array $user): int
+{
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Applicant access is required.');
+    }
+
+    $statement = $pdo->prepare('SELECT tenant_id FROM tenant WHERE user_id = :user_id LIMIT 1');
+    $statement->execute(['user_id' => $user['user_id']]);
+    $tenant = $statement->fetch();
+    if (!$tenant) {
+        throw new ApiException(404, 'Applicant profile was not found.');
+    }
+
+    return (int) $tenant['tenant_id'];
+}
+
 function profileUser(PDO $pdo, array $user): array
 {
     if (($user['role'] ?? null) === 'landlord') {
@@ -169,8 +185,8 @@ function profileGet(PDO $pdo, array $user): array
 
 function landlordDirectoryList(PDO $pdo, array $user): array
 {
-    if (($user['role'] ?? null) !== 'tenant') {
-        throw new ApiException(403, 'Only tenants may view the landlord directory.');
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Only applicants and tenants may view the landlord directory.');
     }
 
     $statement = $pdo->query(
@@ -298,6 +314,8 @@ function propertyCreate(PDO $pdo, array $user, array $input): array
     $propertyType = strtolower(trim((string) ($input['property_type'] ?? '')));
     $address = trim((string) ($input['address'] ?? ''));
     $description = trim((string) ($input['description'] ?? ''));
+    $rentalClassification = strtolower(trim((string) ($input['rental_classification'] ?? 'unknown')));
+    $constructionDate = trim((string) ($input['construction_date'] ?? ''));
 
     if ($propertyName === '') {
         throw new ApiException(422, 'Property name is required.');
@@ -307,6 +325,12 @@ function propertyCreate(PDO $pdo, array $user, array $input): array
     }
     if (!in_array($propertyType, ['apartment', 'house', 'condo', 'townhouse', 'boarding_house', 'commercial', 'other'], true)) {
         throw new ApiException(422, 'Property type is invalid.');
+    }
+    if (!in_array($rentalClassification, ['residential', 'commercial', 'unknown'], true)) {
+        throw new ApiException(422, 'Rental classification must be residential, commercial, or unknown.');
+    }
+    if ($constructionDate !== '' && !rentalDateIsValid($constructionDate)) {
+        throw new ApiException(422, 'Construction date must be a valid calendar date.');
     }
 
     $existingProperty = $pdo->prepare(
@@ -318,8 +342,8 @@ function propertyCreate(PDO $pdo, array $user, array $input): array
     }
 
     $statement = $pdo->prepare(
-        'INSERT INTO property (landlord_id, property_name, property_type, address, description, property_status)
-         VALUES (:landlord_id, :property_name, :property_type, :address, :description, :property_status)',
+        'INSERT INTO property (landlord_id, property_name, property_type, address, description, rental_classification, construction_date, property_status)
+         VALUES (:landlord_id, :property_name, :property_type, :address, :description, :rental_classification, :construction_date, :property_status)',
     );
     $statement->execute([
         'landlord_id' => $landlordId,
@@ -327,6 +351,8 @@ function propertyCreate(PDO $pdo, array $user, array $input): array
         'property_type' => $propertyType,
         'address' => $address,
         'description' => $description !== '' ? $description : null,
+        'rental_classification' => $rentalClassification,
+        'construction_date' => $constructionDate !== '' ? $constructionDate : null,
         'property_status' => 'active',
     ]);
 
@@ -343,7 +369,7 @@ function propertyUpdate(PDO $pdo, array $user, int $propertyId, array $input): a
         throw new ApiException(404, 'Property not found for this landlord.');
     }
 
-    $allowed = ['property_name', 'property_type', 'address', 'description', 'property_status'];
+    $allowed = ['property_name', 'property_type', 'address', 'description', 'property_status', 'rental_classification', 'construction_date'];
     $updates = [];
     $params = ['property_id' => $propertyId];
 
@@ -369,6 +395,16 @@ function propertyUpdate(PDO $pdo, array $user, int $propertyId, array $input): a
         }
         if ($field === 'property_status' && !in_array(strtolower($value), ['active', 'inactive', 'archived'], true)) {
             throw new ApiException(422, 'Property status is invalid.');
+        }
+        if ($field === 'rental_classification' && !in_array(strtolower($value), ['residential', 'commercial', 'unknown'], true)) {
+            throw new ApiException(422, 'Rental classification must be residential, commercial, or unknown.');
+        }
+        if ($field === 'construction_date' && $value !== '' && !rentalDateIsValid($value)) {
+            throw new ApiException(422, 'Construction date must be a valid calendar date.');
+        }
+        if ($field === 'construction_date' && $value === '') {
+            $updates[] = 'construction_date = NULL';
+            continue;
         }
 
         $updates[] = $field . ' = :' . $field;
@@ -396,7 +432,7 @@ function unitList(PDO $pdo, array $user): array
              ORDER BY p.property_name, u.unit_number',
         );
         $statement->execute(['landlord_id' => $landlordId]);
-    } else {
+    } elseif (in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
         $statement = $pdo->query(
             "SELECT u.*, p.property_name, p.address
              FROM rental_unit u
@@ -404,6 +440,8 @@ function unitList(PDO $pdo, array $user): array
              WHERE u.unit_status = 'vacant' AND p.property_status = 'active'
              ORDER BY p.property_name, u.unit_number",
         );
+    } else {
+        throw new ApiException(403, 'Applicant or tenant access is required.');
     }
     $units = $statement->fetchAll();
     if ($units === []) {
@@ -667,7 +705,7 @@ function applicationList(PDO $pdo, array $user): array
         return ['status' => 200, 'body' => $statement->fetchAll()];
     }
 
-    $tenantId = tenantIdForUser($pdo, $user);
+    $tenantId = applicantTenantIdForUser($pdo, $user);
     $statement = $pdo->prepare(
         'SELECT a.*, CONCAT(t.first_name, " ", t.last_name) AS tenant_name
          FROM tenant_application a
@@ -681,11 +719,11 @@ function applicationList(PDO $pdo, array $user): array
 
 function applicationCreate(PDO $pdo, array $user, array $input): array
 {
-    if (($user['role'] ?? null) !== 'tenant') {
-        throw new ApiException(403, 'Only tenants may create applications.');
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Only applicants and tenants may create applications.');
     }
 
-    $tenantId = tenantIdForUser($pdo, $user);
+    $tenantId = applicantTenantIdForUser($pdo, $user);
     $landlordId = (int) ($input['landlord_id'] ?? 0);
     if ($landlordId <= 0) {
         throw new ApiException(422, 'A landlord is required.');
@@ -742,27 +780,45 @@ function applicationStatusUpdate(PDO $pdo, array $user, int $applicationId, arra
         if ((int) $application['landlord_id'] !== $landlordId) {
             throw new ApiException(403, 'You do not have access to this application.');
         }
-    } elseif (($user['role'] ?? null) === 'tenant') {
-        $tenantId = tenantIdForUser($pdo, $user);
+    } elseif (in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        $tenantId = applicantTenantIdForUser($pdo, $user);
         if ((int) $application['tenant_id'] !== $tenantId) {
             throw new ApiException(403, 'You do not have access to this application.');
         }
         if (!in_array($status, ['submitted', 'withdrawn'], true)) {
-            throw new ApiException(403, 'Tenants may only withdraw applications.');
+            throw new ApiException(403, 'Applicants may only withdraw their own applications.');
         }
     } else {
         throw new ApiException(403, 'Access denied.');
     }
 
     $reviewedAt = in_array($status, ['approved', 'rejected', 'under_review'], true) ? date('Y-m-d H:i:s') : null;
-    $statement = $pdo->prepare(
-        'UPDATE tenant_application SET application_status = :status, reviewed_at = :reviewed_at WHERE application_id = :application_id',
-    );
-    $statement->execute([
-        'status' => $status,
-        'reviewed_at' => $reviewedAt,
-        'application_id' => $applicationId,
-    ]);
+    $pdo->beginTransaction();
+    try {
+        $statement = $pdo->prepare(
+            'UPDATE tenant_application SET application_status = :status, reviewed_at = :reviewed_at WHERE application_id = :application_id',
+        );
+        $statement->execute([
+            'status' => $status,
+            'reviewed_at' => $reviewedAt,
+            'application_id' => $applicationId,
+        ]);
+        if (($user['role'] ?? null) === 'landlord' && $status === 'approved') {
+            $promoteApplicant = $pdo->prepare(
+                "UPDATE users u
+                 JOIN tenant t ON t.user_id = u.user_id
+                 SET u.role = 'tenant'
+                 WHERE t.tenant_id = :tenant_id AND u.role = 'applicant'",
+            );
+            $promoteApplicant->execute(['tenant_id' => $application['tenant_id']]);
+        }
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
 
     $statement = $pdo->prepare('SELECT * FROM tenant_application WHERE application_id = :application_id LIMIT 1');
     $statement->execute(['application_id' => $applicationId]);
@@ -1101,6 +1157,399 @@ function leaseList(PDO $pdo, array $user): array
     return ['status' => 200, 'body' => $statement->fetchAll()];
 }
 
+function rentalRegulationList(PDO $pdo, array $user): array
+{
+    landlordIdForUser($pdo, $user);
+    $statement = $pdo->query(
+        'SELECT regulation_code, title, applies_to, monthly_rent_ceiling, annual_increase_percent,
+                max_advance_months, max_security_deposit_months, same_lessee_required,
+                new_construction_cutoff, effective_from, effective_to, source_url, verification_status
+         FROM rental_regulation
+         ORDER BY effective_from DESC, regulation_id',
+    );
+    return ['status' => 200, 'body' => $statement->fetchAll()];
+}
+
+function landlordLeaseRecord(PDO $pdo, array $user, int $leaseId, bool $forUpdate = false): array
+{
+    $landlordId = landlordIdForUser($pdo, $user);
+    $statement = $pdo->prepare(
+        'SELECT l.*, a.landlord_id, a.tenant_id, u.unit_number, u.property_id,
+                p.property_name, p.address, p.rental_classification, p.construction_date,
+                t.first_name AS tenant_first_name, t.last_name AS tenant_last_name,
+                t.email AS tenant_email, t.phone AS tenant_phone,
+                ld.first_name AS landlord_first_name, ld.last_name AS landlord_last_name,
+                ld.phone AS landlord_phone, ld.business_name, lu.email AS landlord_email
+         FROM lease l
+         JOIN tenant_application a ON a.application_id = l.application_id
+         JOIN rental_unit u ON u.unit_id = l.unit_id
+         JOIN property p ON p.property_id = u.property_id
+         JOIN tenant t ON t.tenant_id = a.tenant_id
+         JOIN landlord ld ON ld.landlord_id = a.landlord_id
+         JOIN users lu ON lu.user_id = ld.user_id
+         WHERE l.lease_id = :lease_id AND a.landlord_id = :landlord_id'
+        . ($forUpdate ? ' FOR UPDATE' : ''),
+    );
+    $statement->execute(['lease_id' => $leaseId, 'landlord_id' => $landlordId]);
+    $lease = $statement->fetch();
+    if (!$lease) {
+        throw new ApiException(404, 'Lease not found for this landlord.');
+    }
+    return $lease;
+}
+
+function recordAudit(PDO $pdo, array $user, string $action, string $entity, int $recordId, array $values): void
+{
+    $pdo->prepare(
+        'INSERT INTO audit_log (user_id, action, entity_name, record_id, new_values)
+         VALUES (:user_id, :action, :entity_name, :record_id, :new_values)',
+    )->execute([
+        'user_id' => $user['user_id'],
+        'action' => $action,
+        'entity_name' => $entity,
+        'record_id' => $recordId,
+        'new_values' => json_encode($values, JSON_THROW_ON_ERROR),
+    ]);
+}
+
+function leaseAgreementDataGet(PDO $pdo, array $user, int $leaseId): array
+{
+    $lease = landlordLeaseRecord($pdo, $user, $leaseId);
+    return ['status' => 200, 'body' => ['lease' => $lease]];
+}
+
+function leaseDepositGet(PDO $pdo, array $user, int $leaseId): array
+{
+    landlordLeaseRecord($pdo, $user, $leaseId);
+    $statement = $pdo->prepare(
+        'SELECT d.*,
+                (SELECT COALESCE(SUM(dd.amount), 0) FROM lease_deposit_deduction dd WHERE dd.deposit_id = d.deposit_id) AS deductions_total
+         FROM lease_deposit d WHERE d.lease_id = :lease_id LIMIT 1',
+    );
+    $statement->execute(['lease_id' => $leaseId]);
+    $deposit = $statement->fetch();
+    if (!$deposit) {
+        throw new ApiException(404, 'Deposit record not found.');
+    }
+    $deductions = $pdo->prepare(
+        'SELECT deduction_id, amount, reason, supporting_document_ref, authorized_at
+         FROM lease_deposit_deduction WHERE deposit_id = :deposit_id ORDER BY authorized_at',
+    );
+    $deductions->execute(['deposit_id' => $deposit['deposit_id']]);
+    $deposit['deductions'] = $deductions->fetchAll();
+    return ['status' => 200, 'body' => ['deposit' => $deposit]];
+}
+
+function leaseDepositUpdate(PDO $pdo, array $user, int $leaseId, array $input): array
+{
+    $lease = landlordLeaseRecord($pdo, $user, $leaseId);
+    $receivedDate = trim((string) ($input['received_date'] ?? ''));
+    $bankDate = trim((string) ($input['bank_deposit_date'] ?? ''));
+    $bankReference = trim((string) ($input['bank_account_reference'] ?? ''));
+    $interestInput = $input['accrued_interest'] ?? 0;
+    $refundInput = $input['refund_amount'] ?? 0;
+    $refundDate = trim((string) ($input['refund_date'] ?? ''));
+    $status = strtolower(trim((string) ($input['settlement_status'] ?? 'pending')));
+
+    foreach ([$receivedDate, $bankDate, $refundDate] as $date) {
+        if ($date !== '' && !rentalDateIsValid($date)) {
+            throw new ApiException(422, 'Deposit dates must be valid calendar dates.');
+        }
+    }
+    if (!is_numeric($interestInput) || !is_numeric($refundInput) || (float) $interestInput < 0 || (float) $refundInput < 0) {
+        throw new ApiException(422, 'Accrued interest and refund amount must be zero or greater.');
+    }
+    if (!in_array($status, ['pending', 'held', 'partially_refunded', 'refunded', 'settled'], true)) {
+        throw new ApiException(422, 'Deposit settlement status is invalid.');
+    }
+    if ($bankDate !== '' && ($receivedDate === '' || $bankDate < $receivedDate || $bankReference === '')) {
+        throw new ApiException(422, 'Record the received date and bank account reference before recording a bank deposit.');
+    }
+    if ($refundDate === '' && (float) $refundInput > 0) {
+        throw new ApiException(422, 'A refund date is required when a refund amount is recorded.');
+    }
+    if ($status === 'refunded' && ($refundDate === '' || (float) $refundInput <= 0)) {
+        throw new ApiException(422, 'A deposit cannot be marked refunded without a dated refund amount.');
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $depositQuery = $pdo->prepare(
+            'SELECT * FROM lease_deposit WHERE lease_id = :lease_id FOR UPDATE',
+        );
+        $depositQuery->execute(['lease_id' => $leaseId]);
+        $deposit = $depositQuery->fetch();
+        if (!$deposit) {
+            throw new ApiException(404, 'Deposit record not found.');
+        }
+        $deductionsQuery = $pdo->prepare('SELECT COALESCE(SUM(amount), 0) FROM lease_deposit_deduction WHERE deposit_id = :deposit_id');
+        $deductionsQuery->execute(['deposit_id' => $deposit['deposit_id']]);
+        $deductions = (float) $deductionsQuery->fetchColumn();
+        $available = (float) $deposit['original_amount'] + (float) $interestInput - $deductions;
+        if ((float) $refundInput > $available) {
+            throw new ApiException(422, 'Refund amount cannot exceed the deposit and accrued interest after documented deductions.');
+        }
+        $pdo->prepare(
+            'UPDATE lease_deposit
+             SET received_date = :received_date, bank_deposit_date = :bank_deposit_date,
+                 bank_account_reference = :bank_account_reference, accrued_interest = :accrued_interest,
+                 refund_amount = :refund_amount, refund_date = :refund_date, settlement_status = :settlement_status
+             WHERE deposit_id = :deposit_id',
+        )->execute([
+            'received_date' => $receivedDate !== '' ? $receivedDate : null,
+            'bank_deposit_date' => $bankDate !== '' ? $bankDate : null,
+            'bank_account_reference' => $bankReference !== '' ? $bankReference : null,
+            'accrued_interest' => number_format((float) $interestInput, 2, '.', ''),
+            'refund_amount' => number_format((float) $refundInput, 2, '.', ''),
+            'refund_date' => $refundDate !== '' ? $refundDate : null,
+            'settlement_status' => $status,
+            'deposit_id' => $deposit['deposit_id'],
+        ]);
+        recordAudit($pdo, $user, 'lease_deposit_updated', 'lease_deposit', (int) $deposit['deposit_id'], [
+            'received_date' => $receivedDate ?: null,
+            'bank_deposit_date' => $bankDate ?: null,
+            'accrued_interest' => (float) $interestInput,
+            'refund_amount' => (float) $refundInput,
+            'settlement_status' => $status,
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+    return leaseDepositGet($pdo, $user, $leaseId);
+}
+
+function leaseDepositDeductionCreate(PDO $pdo, array $user, int $leaseId, array $input): array
+{
+    landlordLeaseRecord($pdo, $user, $leaseId);
+    $amount = $input['amount'] ?? null;
+    $basis = strtolower(trim((string) ($input['basis'] ?? '')));
+    $reason = trim((string) ($input['reason'] ?? ''));
+    $evidence = trim((string) ($input['supporting_document_ref'] ?? ''));
+    if (!is_numeric($amount) || (float) $amount <= 0 || !in_array($basis, ['unpaid_obligation', 'damage'], true) || $reason === '' || $evidence === '') {
+        throw new ApiException(422, 'A positive deduction amount, supported basis, reason, and supporting document reference are required.');
+    }
+    $pdo->beginTransaction();
+    try {
+        $depositQuery = $pdo->prepare('SELECT * FROM lease_deposit WHERE lease_id = :lease_id FOR UPDATE');
+        $depositQuery->execute(['lease_id' => $leaseId]);
+        $deposit = $depositQuery->fetch();
+        if (!$deposit) {
+            throw new ApiException(404, 'Deposit record not found.');
+        }
+        $sumQuery = $pdo->prepare('SELECT COALESCE(SUM(amount), 0) FROM lease_deposit_deduction WHERE deposit_id = :deposit_id');
+        $sumQuery->execute(['deposit_id' => $deposit['deposit_id']]);
+        $deductions = (float) $sumQuery->fetchColumn();
+        $available = (float) $deposit['original_amount'] + (float) $deposit['accrued_interest'] - $deductions - (float) $deposit['refund_amount'];
+        if ((float) $amount > $available) {
+            throw new ApiException(422, 'Deduction exceeds the remaining deposit and interest balance.');
+        }
+        $statement = $pdo->prepare(
+            'INSERT INTO lease_deposit_deduction (deposit_id, amount, basis, reason, supporting_document_ref, authorized_by)
+             VALUES (:deposit_id, :amount, :basis, :reason, :supporting_document_ref, :authorized_by)',
+        );
+        $statement->execute([
+            'deposit_id' => $deposit['deposit_id'],
+            'amount' => number_format((float) $amount, 2, '.', ''),
+            'basis' => $basis,
+            'reason' => $reason,
+            'supporting_document_ref' => $evidence,
+            'authorized_by' => $user['user_id'],
+        ]);
+        $deductionId = (int) $pdo->lastInsertId();
+        recordAudit($pdo, $user, 'lease_deposit_deduction_added', 'lease_deposit_deduction', $deductionId, [
+            'lease_id' => $leaseId,
+            'amount' => (float) $amount,
+            'reason' => $reason,
+            'supporting_document_ref' => $evidence,
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+    return leaseDepositGet($pdo, $user, $leaseId);
+}
+
+function leaseRentIncreaseList(PDO $pdo, array $user, int $leaseId): array
+{
+    landlordLeaseRecord($pdo, $user, $leaseId);
+    $statement = $pdo->prepare(
+        'SELECT h.*, r.title AS regulation_title
+         FROM rent_increase_history h LEFT JOIN rental_regulation r ON r.regulation_id = h.regulation_id
+         WHERE h.lease_id = :lease_id ORDER BY h.effective_date DESC, h.rent_increase_id DESC',
+    );
+    $statement->execute(['lease_id' => $leaseId]);
+    return ['status' => 200, 'body' => $statement->fetchAll()];
+}
+
+function leaseRentIncreaseCreate(PDO $pdo, array $user, int $leaseId, array $input): array
+{
+    $pdo->beginTransaction();
+    try {
+        $lease = landlordLeaseRecord($pdo, $user, $leaseId, true);
+        $proposed = $input['proposed_monthly_rent'] ?? null;
+        $effectiveDate = trim((string) ($input['effective_date'] ?? ''));
+        $reason = trim((string) ($input['reason'] ?? ''));
+        if (!is_numeric($proposed) || (float) $proposed <= 0 || !rentalDateIsValid($effectiveDate)
+            || $effectiveDate < $lease['lease_start_date'] || $reason === '') {
+            throw new ApiException(422, 'A positive proposed rent, valid effective date on or after lease start, and reason are required.');
+        }
+
+        $newRent = (float) $proposed;
+        $oldRent = (float) $lease['monthly_rent'];
+        $increasePercent = (($newRent - $oldRent) / $oldRent) * 100;
+        if ($increasePercent < 0) {
+            throw new ApiException(422, 'Rent increase history cannot be used to reduce rent; use a lease amendment workflow.');
+        }
+        $assessment = rentalComplianceAssessment($pdo, $lease, $newRent, $effectiveDate, true);
+        $status = $assessment['status'];
+        $regulation = $assessment['regulation'] ?? null;
+        if ($status === 'compliant' && $assessment['same_lessee_required']) {
+            $lastEffective = $lease['lease_start_date'];
+            $history = $pdo->prepare(
+                "SELECT MAX(effective_date) FROM rent_increase_history
+                 WHERE lease_id = :lease_id AND assessment_status = 'approved'",
+            );
+            $history->execute(['lease_id' => $leaseId]);
+            $lastEffective = max($lastEffective, (string) ($history->fetchColumn() ?: $lastEffective));
+            $earliestAllowed = (new DateTimeImmutable($lastEffective))->modify('+1 year')->format('Y-m-d');
+            if ($effectiveDate < $earliestAllowed) {
+                throw new ApiException(422, 'Rent increases under this rule may not take effect more than once in a 12-month period.');
+            }
+            $maximum = $oldRent * (1 + (float) $regulation['annual_increase_percent'] / 100);
+            if ($newRent > $maximum + 0.0001) {
+                throw new ApiException(422, 'Proposed rent exceeds the configured annual increase limit for this continuing lessee.');
+            }
+        }
+        if ($status === 'requires_manual_verification') {
+            $statement = $pdo->prepare(
+                'INSERT INTO rent_increase_history
+                 (lease_id, previous_monthly_rent, proposed_monthly_rent, increase_percent, effective_date, regulation_id, reason, assessment_status, created_by)
+                 VALUES (:lease_id, :previous_monthly_rent, :proposed_monthly_rent, :increase_percent, :effective_date, :regulation_id, :reason, :assessment_status, :created_by)',
+            );
+            $statement->execute([
+                'lease_id' => $leaseId,
+                'previous_monthly_rent' => number_format($oldRent, 2, '.', ''),
+                'proposed_monthly_rent' => number_format($newRent, 2, '.', ''),
+                'increase_percent' => number_format($increasePercent, 4, '.', ''),
+                'effective_date' => $effectiveDate,
+                'regulation_id' => $regulation['regulation_id'] ?? null,
+                'reason' => $reason . ' [Not approved: ' . $assessment['message'] . ']',
+                'assessment_status' => 'requires_manual_verification',
+                'created_by' => $user['user_id'],
+            ]);
+            $proposalId = (int) $pdo->lastInsertId();
+            recordAudit($pdo, $user, 'rent_increase_requires_review', 'rent_increase_history', $proposalId, [
+                'lease_id' => $leaseId,
+                'proposed_monthly_rent' => $newRent,
+                'effective_date' => $effectiveDate,
+                'assessment' => $assessment['message'],
+            ]);
+            $pdo->commit();
+            return ['status' => 202, 'body' => ['message' => 'Rent change was not applied. The proposal was recorded for manual legal verification: ' . $assessment['message']]];
+        }
+
+        $statement = $pdo->prepare(
+            'INSERT INTO rent_increase_history
+             (lease_id, previous_monthly_rent, proposed_monthly_rent, approved_monthly_rent, increase_percent, effective_date, regulation_id, approval_date, reason, assessment_status, created_by)
+             VALUES (:lease_id, :previous_monthly_rent, :proposed_monthly_rent, :approved_monthly_rent, :increase_percent, :effective_date, :regulation_id, CURDATE(), :reason, :assessment_status, :created_by)',
+        );
+        $statement->execute([
+            'lease_id' => $leaseId,
+            'previous_monthly_rent' => number_format($oldRent, 2, '.', ''),
+            'proposed_monthly_rent' => number_format($newRent, 2, '.', ''),
+            'approved_monthly_rent' => number_format($newRent, 2, '.', ''),
+            'increase_percent' => number_format($increasePercent, 4, '.', ''),
+            'effective_date' => $effectiveDate,
+            'regulation_id' => $regulation['regulation_id'] ?? null,
+            'reason' => $reason,
+            'assessment_status' => $status === 'not_covered' ? 'not_covered' : 'approved',
+            'created_by' => $user['user_id'],
+        ]);
+        $recordId = (int) $pdo->lastInsertId();
+        $pdo->prepare('UPDATE lease SET monthly_rent = :rent WHERE lease_id = :lease_id')
+            ->execute(['rent' => number_format($newRent, 2, '.', ''), 'lease_id' => $leaseId]);
+        recordAudit($pdo, $user, 'lease_rent_increased', 'lease', $leaseId, [
+            'rent_increase_id' => $recordId,
+            'previous_monthly_rent' => $oldRent,
+            'approved_monthly_rent' => $newRent,
+            'effective_date' => $effectiveDate,
+            'regulation_id' => $regulation['regulation_id'] ?? null,
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+    return leaseRentIncreaseList($pdo, $user, $leaseId);
+}
+
+function leaseNoticeList(PDO $pdo, array $user, int $leaseId): array
+{
+    landlordLeaseRecord($pdo, $user, $leaseId);
+    $statement = $pdo->prepare('SELECT * FROM lease_notice WHERE lease_id = :lease_id ORDER BY notice_date DESC, notice_id DESC');
+    $statement->execute(['lease_id' => $leaseId]);
+    return ['status' => 200, 'body' => $statement->fetchAll()];
+}
+
+function leaseNoticeCreate(PDO $pdo, array $user, int $leaseId, array $input): array
+{
+    landlordLeaseRecord($pdo, $user, $leaseId);
+    $type = strtolower(trim((string) ($input['notice_type'] ?? '')));
+    $date = trim((string) ($input['notice_date'] ?? ''));
+    $recipient = trim((string) ($input['recipient'] ?? ''));
+    $description = trim((string) ($input['description'] ?? ''));
+    $ground = trim((string) ($input['legal_ground'] ?? ''));
+    $consent = filter_var($input['written_sublease_consent'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    $document = trim((string) ($input['supporting_document_ref'] ?? ''));
+    $types = ['tenant_notice', 'payment_demand', 'lease_expiration', 'lease_termination', 'sublease_consent', 'other'];
+    $grounds = ['unauthorized_sublease', 'rent_arrears', 'owner_or_family_use', 'necessary_repairs', 'lease_expiration', 'other'];
+    if (!in_array($type, $types, true) || !rentalDateIsValid($date) || $recipient === '' || $description === '') {
+        throw new ApiException(422, 'A valid notice type, date, recipient, and description are required.');
+    }
+    if ($type === 'sublease_consent' && (!$consent || $document === '')) {
+        throw new ApiException(422, 'Written sublease consent requires a supporting document reference.');
+    }
+    if ($type === 'lease_termination' && (!in_array($ground, $grounds, true) || $ground === '')) {
+        throw new ApiException(422, 'Record a recognized termination ground; the system does not terminate leases automatically.');
+    }
+    $pdo->beginTransaction();
+    try {
+        $statement = $pdo->prepare(
+            'INSERT INTO lease_notice (lease_id, notice_type, notice_date, recipient, description, legal_ground, written_sublease_consent, supporting_document_ref, recorded_by)
+             VALUES (:lease_id, :notice_type, :notice_date, :recipient, :description, :legal_ground, :written_sublease_consent, :supporting_document_ref, :recorded_by)',
+        );
+        $statement->execute([
+            'lease_id' => $leaseId,
+            'notice_type' => $type,
+            'notice_date' => $date,
+            'recipient' => $recipient,
+            'description' => $description,
+            'legal_ground' => $ground !== '' ? $ground : null,
+            'written_sublease_consent' => $consent ? 1 : 0,
+            'supporting_document_ref' => $document !== '' ? $document : null,
+            'recorded_by' => $user['user_id'],
+        ]);
+        $noticeId = (int) $pdo->lastInsertId();
+        recordAudit($pdo, $user, 'lease_notice_recorded', 'lease_notice', $noticeId, ['lease_id' => $leaseId, 'notice_type' => $type, 'legal_ground' => $ground ?: null]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+    return leaseNoticeList($pdo, $user, $leaseId);
+}
+
 function leaseCreate(PDO $pdo, array $user, array $input): array
 {
     $landlordId = landlordIdForUser($pdo, $user);
@@ -1110,62 +1559,165 @@ function leaseCreate(PDO $pdo, array $user, array $input): array
         throw new ApiException(422, 'Application ID and unit ID are required.');
     }
 
-    $statement = $pdo->prepare('SELECT * FROM tenant_application WHERE application_id = :application_id LIMIT 1');
-    $statement->execute(['application_id' => $applicationId]);
-    $application = $statement->fetch();
-    if (!$application) {
-        throw new ApiException(404, 'Application not found.');
-    }
-    if ((int) $application['landlord_id'] !== $landlordId) {
-        throw new ApiException(403, 'You do not have access to this application.');
-    }
-    if ($application['application_status'] !== 'approved') {
-        throw new ApiException(422, 'Only approved applications can be converted into a lease.');
-    }
-    if (!unitBelongsToLandlord($pdo, $unitId, $landlordId)) {
-        throw new ApiException(422, 'Unit does not belong to this landlord.');
-    }
-
     $startDate = (string) ($input['lease_start_date'] ?? '');
     $endDate = (string) ($input['lease_end_date'] ?? '');
-    $monthlyRent = (float) ($input['monthly_rent'] ?? 0);
-
-    if ($startDate === '' || $endDate === '') {
-        throw new ApiException(422, 'Lease start and end dates are required.');
+    $rentInput = $input['monthly_rent'] ?? null;
+    $depositInput = $input['security_deposit'] ?? 0;
+    $advanceInput = $input['advance_payment'] ?? 0;
+    $dueDayInput = $input['payment_due_day'] ?? null;
+    if (!rentalDateIsValid($startDate) || !rentalDateIsValid($endDate) || $endDate <= $startDate) {
+        throw new ApiException(422, 'Lease dates must be valid, and the end date must be later than the start date.');
     }
-    if ($monthlyRent <= 0) {
-        throw new ApiException(422, 'Monthly rent must be greater than zero.');
+    if (!is_numeric($rentInput) || !is_numeric($depositInput) || !is_numeric($advanceInput)
+        || !is_numeric($dueDayInput) || (int) $dueDayInput < 1 || (int) $dueDayInput > 31) {
+        throw new ApiException(422, 'Rent, deposit, advance rent, and a payment due day from 1 through 31 are required.');
     }
+    $monthlyRent = (float) $rentInput;
+    $securityDeposit = (float) $depositInput;
+    $advanceRent = (float) $advanceInput;
 
-    $insert = $pdo->prepare(
-        'INSERT INTO lease (application_id, unit_id, lease_start_date, lease_end_date, monthly_rent, security_deposit, advance_payment, payment_due_day, lease_status)
-         VALUES (:application_id, :unit_id, :lease_start_date, :lease_end_date, :monthly_rent, :security_deposit, :advance_payment, :payment_due_day, :lease_status)',
-    );
-    $insert->execute([
-        'application_id' => $applicationId,
-        'unit_id' => $unitId,
-        'lease_start_date' => $startDate,
-        'lease_end_date' => $endDate,
-        'monthly_rent' => number_format($monthlyRent, 2, '.', ''),
-        'security_deposit' => number_format((float) ($input['security_deposit'] ?? 0), 2, '.', ''),
-        'advance_payment' => number_format((float) ($input['advance_payment'] ?? 0), 2, '.', ''),
-        'payment_due_day' => max(1, min(28, (int) ($input['payment_due_day'] ?? 1))),
-        'lease_status' => 'pending',
-    ]);
+    $pdo->beginTransaction();
+    try {
+        $applicationStatement = $pdo->prepare(
+            'SELECT * FROM tenant_application WHERE application_id = :application_id FOR UPDATE',
+        );
+        $applicationStatement->execute(['application_id' => $applicationId]);
+        $application = $applicationStatement->fetch();
+        if (!$application) {
+            throw new ApiException(404, 'Application not found.');
+        }
+        if ((int) $application['landlord_id'] !== $landlordId) {
+            throw new ApiException(403, 'You do not have access to this application.');
+        }
+        if ($application['application_status'] !== 'approved') {
+            throw new ApiException(422, 'Only approved applications can be converted into a lease.');
+        }
+        $existingLease = $pdo->prepare('SELECT lease_id FROM lease WHERE application_id = :application_id LIMIT 1');
+        $existingLease->execute(['application_id' => $applicationId]);
+        if ($existingLease->fetchColumn()) {
+            throw new ApiException(409, 'This approved application already has a lease.');
+        }
 
-    $leaseId = (int) $pdo->lastInsertId();
-    $tenantId = (int) $application['tenant_id'];
-    $link = $pdo->prepare(
-        'INSERT INTO lease_tenant (lease_id, tenant_id, tenant_type, joined_at, left_at)
-         VALUES (:lease_id, :tenant_id, :tenant_type, CURDATE(), NULL)',
-    );
-    $link->execute([
-        'lease_id' => $leaseId,
-        'tenant_id' => $tenantId,
-        'tenant_type' => 'primary',
-    ]);
-    $pdo->prepare("UPDATE rental_unit SET unit_status = 'reserved' WHERE unit_id = :unit_id")
-        ->execute(['unit_id' => $unitId]);
+        $unitStatement = $pdo->prepare(
+            'SELECT u.*, p.landlord_id, p.rental_classification, p.construction_date
+             FROM rental_unit u JOIN property p ON p.property_id = u.property_id
+             WHERE u.unit_id = :unit_id FOR UPDATE',
+        );
+        $unitStatement->execute(['unit_id' => $unitId]);
+        $unit = $unitStatement->fetch();
+        if (!$unit || (int) $unit['landlord_id'] !== $landlordId) {
+            throw new ApiException(422, 'Unit does not belong to this landlord.');
+        }
+        if (!in_array($unit['unit_status'], ['vacant', 'reserved', 'occupied'], true)) {
+            throw new ApiException(422, 'This unit is not available for lease creation.');
+        }
+        $overlap = $pdo->prepare(
+            "SELECT lease_id FROM lease
+             WHERE unit_id = :unit_id AND lease_status IN ('pending', 'active')
+               AND lease_start_date <= :end_date AND lease_end_date >= :start_date
+             LIMIT 1",
+        );
+        $overlap->execute(['unit_id' => $unitId, 'end_date' => $endDate, 'start_date' => $startDate]);
+        if ($overlap->fetchColumn()) {
+            throw new ApiException(409, 'This unit already has a pending or active lease that overlaps these dates.');
+        }
+
+        $priorLease = $pdo->prepare(
+            "SELECT l.lease_id
+             FROM lease l
+             JOIN tenant_application a ON a.application_id = l.application_id
+             WHERE l.unit_id = :unit_id AND a.tenant_id = :tenant_id
+               AND l.lease_status IN ('active', 'ended')
+               AND l.lease_end_date >= DATE_SUB(:lease_start_date_for_gap, INTERVAL 1 DAY)
+               AND l.lease_start_date < :lease_start_date_for_before
+             ORDER BY l.lease_end_date DESC LIMIT 1",
+        );
+        $priorLease->execute([
+            'unit_id' => $unitId,
+            'tenant_id' => $application['tenant_id'],
+            'lease_start_date_for_gap' => $startDate,
+            'lease_start_date_for_before' => $startDate,
+        ]);
+        $continuingLessee = (bool) $priorLease->fetchColumn();
+        $assessment = rentalComplianceAssessment($pdo, $unit, $monthlyRent, $startDate, $continuingLessee);
+        validateLeaseFinancialTerms($pdo, $assessment, $monthlyRent, $advanceRent, $securityDeposit);
+        $regulation = $assessment['regulation'] ?? $assessment['deposit_regulation'] ?? null;
+        $assessmentText = $assessment['message'];
+        if ($regulation) {
+            $assessmentText .= ' Rule: ' . $regulation['title'] . '; effective '
+                . ($regulation['effective_from'] ?: 'date requires verification') . ' through '
+                . ($regulation['effective_to'] ?: 'no configured end date') . '.';
+        }
+
+        $insert = $pdo->prepare(
+            'INSERT INTO lease (application_id, unit_id, lease_start_date, lease_end_date, monthly_rent, security_deposit, advance_payment, payment_due_day, regulation_id, compliance_status, compliance_assessment, lease_status)
+             VALUES (:application_id, :unit_id, :lease_start_date, :lease_end_date, :monthly_rent, :security_deposit, :advance_payment, :payment_due_day, :regulation_id, :compliance_status, :compliance_assessment, :lease_status)',
+        );
+        $insert->execute([
+            'application_id' => $applicationId,
+            'unit_id' => $unitId,
+            'lease_start_date' => $startDate,
+            'lease_end_date' => $endDate,
+            'monthly_rent' => number_format($monthlyRent, 2, '.', ''),
+            'security_deposit' => number_format($securityDeposit, 2, '.', ''),
+            'advance_payment' => number_format($advanceRent, 2, '.', ''),
+            'payment_due_day' => (int) $dueDayInput,
+            'regulation_id' => $regulation['regulation_id'] ?? null,
+            'compliance_status' => $assessment['status'],
+            'compliance_assessment' => $assessmentText,
+            'lease_status' => 'pending',
+        ]);
+        $leaseId = (int) $pdo->lastInsertId();
+        $pdo->prepare(
+            'INSERT INTO lease_tenant (lease_id, tenant_id, tenant_type, joined_at, left_at)
+             VALUES (:lease_id, :tenant_id, :tenant_type, :joined_at, NULL)',
+        )->execute([
+            'lease_id' => $leaseId,
+            'tenant_id' => $application['tenant_id'],
+            'tenant_type' => 'primary',
+            'joined_at' => $startDate,
+        ]);
+        $pdo->prepare(
+            'INSERT INTO lease_deposit (lease_id, original_amount, settlement_status)
+             VALUES (:lease_id, :original_amount, :settlement_status)',
+        )->execute([
+            'lease_id' => $leaseId,
+            'original_amount' => number_format($securityDeposit, 2, '.', ''),
+            'settlement_status' => $securityDeposit > 0 ? 'pending' : 'settled',
+        ]);
+        $activeUnitLease = $pdo->prepare(
+            "SELECT lease_id FROM lease
+             WHERE unit_id = :unit_id AND lease_status = 'active'
+               AND lease_start_date <= CURDATE() AND lease_end_date >= CURDATE()
+             LIMIT 1",
+        );
+        $activeUnitLease->execute(['unit_id' => $unitId]);
+        $unitStatus = $activeUnitLease->fetchColumn() ? 'occupied' : 'reserved';
+        $pdo->prepare('UPDATE rental_unit SET unit_status = :unit_status WHERE unit_id = :unit_id')
+            ->execute(['unit_status' => $unitStatus, 'unit_id' => $unitId]);
+        $pdo->prepare(
+            'INSERT INTO audit_log (user_id, action, entity_name, record_id, new_values)
+             VALUES (:user_id, :action, :entity_name, :record_id, :new_values)',
+        )->execute([
+            'user_id' => $user['user_id'],
+            'action' => 'lease_created',
+            'entity_name' => 'lease',
+            'record_id' => $leaseId,
+            'new_values' => json_encode([
+                'unit_id' => $unitId,
+                'application_id' => $applicationId,
+                'monthly_rent' => $monthlyRent,
+                'security_deposit' => $securityDeposit,
+                'compliance_status' => $assessment['status'],
+            ], JSON_THROW_ON_ERROR),
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
 
     $row = $pdo->prepare('SELECT * FROM lease WHERE lease_id = :lease_id LIMIT 1');
     $row->execute(['lease_id' => $leaseId]);
@@ -1193,8 +1745,11 @@ function leaseUpdate(PDO $pdo, array $user, int $leaseId, array $input): array
     if ((int) $lease['landlord_id'] !== $landlordId) {
         throw new ApiException(403, 'You do not have access to this lease.');
     }
+    if (array_key_exists('monthly_rent', $input)) {
+        throw new ApiException(422, 'Use the rent-increase workflow to change rent so the change is assessed and retained in lease history.');
+    }
 
-    $allowed = ['lease_start_date', 'lease_end_date', 'monthly_rent', 'security_deposit', 'advance_payment', 'payment_due_day', 'lease_status'];
+    $allowed = ['lease_start_date', 'lease_end_date', 'payment_due_day', 'lease_status'];
     $updates = [];
     $params = ['lease_id' => $leaseId];
 
@@ -1204,47 +1759,81 @@ function leaseUpdate(PDO $pdo, array $user, int $leaseId, array $input): array
         }
 
         $value = $input[$field];
-        if ($field === 'monthly_rent') {
-            $number = (float) $value;
-            if ($number <= 0) {
-                throw new ApiException(422, 'Monthly rent must be greater than zero.');
+        if ($field === 'lease_status') {
+            $value = strtolower((string) $value);
+            if (!in_array($value, ['pending', 'active', 'ended', 'terminated', 'cancelled'], true)) {
+                throw new ApiException(422, 'Lease status is invalid.');
             }
-            $updates[] = 'monthly_rent = :monthly_rent';
-            $params['monthly_rent'] = number_format($number, 2, '.', '');
-            continue;
         }
-
-        if ($field === 'lease_status' && !in_array(strtolower((string) $value), ['pending', 'active', 'ended', 'terminated', 'cancelled'], true)) {
-            throw new ApiException(422, 'Lease status is invalid.');
+        if ($field === 'payment_due_day' && (!is_numeric($value) || (int) $value < 1 || (int) $value > 31)) {
+            throw new ApiException(422, 'Payment due day must be between 1 and 31.');
         }
 
         $updates[] = $field . ' = :' . $field;
         $params[$field] = $value;
     }
 
-    if (count($updates) > 0) {
-        $pdo->prepare('UPDATE lease SET ' . implode(', ', $updates) . ' WHERE lease_id = :lease_id')->execute($params);
+    $startDate = (string) ($input['lease_start_date'] ?? $lease['lease_start_date']);
+    $endDate = (string) ($input['lease_end_date'] ?? $lease['lease_end_date']);
+    if (!rentalDateIsValid($startDate) || !rentalDateIsValid($endDate) || $endDate <= $startDate) {
+        throw new ApiException(422, 'Lease dates must be valid, and the end date must be later than the start date.');
     }
 
-    if (array_key_exists('lease_status', $input)) {
-        $status = strtolower((string) $input['lease_status']);
-        if ($status === 'active') {
-            $pdo->prepare("UPDATE rental_unit SET unit_status = 'occupied' WHERE unit_id = :unit_id")
-                ->execute(['unit_id' => $lease['unit_id']]);
-        } elseif (in_array($status, ['ended', 'terminated', 'cancelled'], true)) {
-            $activeLease = $pdo->prepare(
-                "SELECT lease_status FROM lease
+    $pdo->beginTransaction();
+    try {
+        if (count($updates) > 0) {
+            $overlap = $pdo->prepare(
+                "SELECT lease_id FROM lease
                  WHERE unit_id = :unit_id AND lease_id <> :lease_id
-                 AND lease_status IN ('active', 'pending')
-                 ORDER BY CASE lease_status WHEN 'active' THEN 0 ELSE 1 END
+                   AND lease_status IN ('pending', 'active')
+                   AND lease_start_date <= :end_date AND lease_end_date >= :start_date
                  LIMIT 1",
             );
-            $activeLease->execute(['unit_id' => $lease['unit_id'], 'lease_id' => $leaseId]);
-            $otherStatus = $activeLease->fetchColumn();
-            $unitStatus = $otherStatus === 'active' ? 'occupied' : ($otherStatus === 'pending' ? 'reserved' : 'vacant');
+            $overlap->execute([
+                'unit_id' => $lease['unit_id'],
+                'lease_id' => $leaseId,
+                'end_date' => $endDate,
+                'start_date' => $startDate,
+            ]);
+            if ($overlap->fetchColumn()) {
+                throw new ApiException(409, 'This unit already has a pending or active lease that overlaps these dates.');
+            }
+            $pdo->prepare('UPDATE lease SET ' . implode(', ', $updates) . ' WHERE lease_id = :lease_id')->execute($params);
+        }
+
+        $status = strtolower((string) ($input['lease_status'] ?? $lease['lease_status']));
+        if (in_array($status, ['active', 'pending', 'ended', 'terminated', 'cancelled'], true)) {
+            $currentLease = $pdo->prepare(
+                "SELECT lease_status FROM lease
+                 WHERE unit_id = :unit_id AND lease_status IN ('active', 'pending')
+                   AND lease_start_date <= CURDATE() AND lease_end_date >= CURDATE()
+                 ORDER BY CASE lease_status WHEN 'active' THEN 0 ELSE 1 END LIMIT 1",
+            );
+            $currentLease->execute(['unit_id' => $lease['unit_id']]);
+            $currentLeaseStatus = $currentLease->fetchColumn();
+            $futureLease = $pdo->prepare(
+                "SELECT lease_id FROM lease
+                 WHERE unit_id = :unit_id AND lease_status IN ('active', 'pending')
+                   AND lease_start_date > CURDATE() LIMIT 1",
+            );
+            $futureLease->execute(['unit_id' => $lease['unit_id']]);
+            $unitStatus = $currentLeaseStatus === 'active'
+                ? 'occupied'
+                : (($currentLeaseStatus === 'pending' || $futureLease->fetchColumn()) ? 'reserved' : 'vacant');
             $pdo->prepare('UPDATE rental_unit SET unit_status = :unit_status WHERE unit_id = :unit_id')
                 ->execute(['unit_status' => $unitStatus, 'unit_id' => $lease['unit_id']]);
         }
+        if (count($updates) > 0) {
+            recordAudit($pdo, $user, 'lease_updated', 'lease', $leaseId, [
+                'changed_fields' => array_keys(array_intersect_key($input, array_flip(['lease_start_date', 'lease_end_date', 'payment_due_day', 'lease_status']))),
+            ]);
+        }
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
     }
 
     $row = $pdo->prepare('SELECT * FROM lease WHERE lease_id = :lease_id LIMIT 1');
@@ -1311,6 +1900,19 @@ function invoiceCreate(PDO $pdo, array $user, array $input): array
         throw new ApiException(403, 'You do not have access to this lease.');
     }
 
+    $periodStart = (string) ($input['billing_period_start'] ?? date('Y-m-01'));
+    $periodEnd = (string) ($input['billing_period_end'] ?? date('Y-m-t'));
+    $issueDate = (string) ($input['issue_date'] ?? date('Y-m-d'));
+    $dueDate = (string) ($input['due_date'] ?? leasePaymentDueDate($periodStart, (int) $lease['payment_due_day']));
+    $amount = $input['total_amount'] ?? null;
+    if (!rentalDateIsValid($periodStart) || !rentalDateIsValid($periodEnd) || !rentalDateIsValid($issueDate)
+        || !rentalDateIsValid($dueDate) || $periodEnd < $periodStart || $dueDate < $issueDate
+        || !is_numeric($amount) || (float) $amount <= 0) {
+        throw new ApiException(422, 'Invoice dates and amount are invalid.');
+    }
+
+    $pdo->beginTransaction();
+    try {
     $insert = $pdo->prepare(
         'INSERT INTO rent_invoice (lease_id, invoice_number, billing_period_start, billing_period_end, issue_date, due_date, total_amount, invoice_status)
          VALUES (:lease_id, :invoice_number, :billing_period_start, :billing_period_end, :issue_date, :due_date, :total_amount, :invoice_status)',
@@ -1318,15 +1920,29 @@ function invoiceCreate(PDO $pdo, array $user, array $input): array
     $insert->execute([
         'lease_id' => $leaseId,
         'invoice_number' => $invoiceNumber,
-        'billing_period_start' => (string) ($input['billing_period_start'] ?? date('Y-m-01')),
-        'billing_period_end' => (string) ($input['billing_period_end'] ?? date('Y-m-t')),
-        'issue_date' => (string) ($input['issue_date'] ?? date('Y-m-d')),
-        'due_date' => (string) ($input['due_date'] ?? date('Y-m-d')),
-        'total_amount' => number_format((float) ($input['total_amount'] ?? 0), 2, '.', ''),
+        'billing_period_start' => $periodStart,
+        'billing_period_end' => $periodEnd,
+        'issue_date' => $issueDate,
+        'due_date' => $dueDate,
+        'total_amount' => number_format((float) $amount, 2, '.', ''),
         'invoice_status' => 'unpaid',
     ]);
 
     $invoiceId = (int) $pdo->lastInsertId();
+    recordAudit($pdo, $user, 'invoice_created', 'rent_invoice', $invoiceId, [
+        'lease_id' => $leaseId,
+        'invoice_number' => $invoiceNumber,
+        'total_amount' => (float) $amount,
+        'due_date' => $dueDate,
+    ]);
+    $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+
     $row = $pdo->prepare('SELECT * FROM rent_invoice WHERE invoice_id = :invoice_id LIMIT 1');
     $row->execute(['invoice_id' => $invoiceId]);
     return ['status' => 201, 'body' => $row->fetch()];
@@ -1335,17 +1951,37 @@ function invoiceCreate(PDO $pdo, array $user, array $input): array
 function invoiceStatusUpdate(PDO $pdo, array $user, int $invoiceId, array $input): array
 {
     $status = strtolower(trim((string) ($input['status'] ?? '')));
-    $allowed = ['unpaid', 'partially_paid', 'paid', 'overdue', 'void'];
+    if (($user['role'] ?? null) !== 'landlord') {
+        throw new ApiException(403, 'Only landlords can update invoice status.');
+    }
+    $allowed = ['unpaid', 'overdue', 'void'];
     if (!in_array($status, $allowed, true)) {
-        throw new ApiException(422, 'Invoice status is invalid.');
+        throw new ApiException(422, 'Invoice status is invalid. Payment-derived statuses are updated only by confirmed payment records.');
     }
 
-    if (!invoiceBelongsToUser($pdo, $invoiceId, $user)) {
+    $invoice = $pdo->prepare(
+        'SELECT i.invoice_id, i.invoice_status, a.landlord_id
+         FROM rent_invoice i
+         JOIN lease l ON l.lease_id = i.lease_id
+         JOIN tenant_application a ON a.application_id = l.application_id
+         WHERE i.invoice_id = :invoice_id LIMIT 1',
+    );
+    $invoice->execute(['invoice_id' => $invoiceId]);
+    $invoiceRow = $invoice->fetch();
+    if (!$invoiceRow) {
+        throw new ApiException(404, 'Invoice not found.');
+    }
+    if ((int) $invoiceRow['landlord_id'] !== landlordIdForUser($pdo, $user)) {
         throw new ApiException(403, 'You do not have access to this invoice.');
     }
-
-    $update = $pdo->prepare('UPDATE rent_invoice SET invoice_status = :status WHERE invoice_id = :invoice_id');
-    $update->execute(['status' => $status, 'invoice_id' => $invoiceId]);
+    if ($status === 'void' && $invoiceRow['invoice_status'] === 'paid') {
+        throw new ApiException(422, 'A paid invoice cannot be voided.');
+    }
+    if (in_array($invoiceRow['invoice_status'], ['paid', 'partially_paid'], true) && $status !== 'void') {
+        throw new ApiException(422, 'Payment-derived invoice status cannot be overwritten manually.');
+    }
+    $pdo->prepare('UPDATE rent_invoice SET invoice_status = :status WHERE invoice_id = :invoice_id')
+        ->execute(['status' => $status, 'invoice_id' => $invoiceId]);
 
     $row = $pdo->prepare('SELECT * FROM rent_invoice WHERE invoice_id = :invoice_id LIMIT 1');
     $row->execute(['invoice_id' => $invoiceId]);
@@ -1367,7 +2003,8 @@ function paymentList(PDO $pdo, array $user): array
     if (($user['role'] ?? null) === 'landlord') {
         $landlordId = landlordIdForUser($pdo, $user);
         $statement = $pdo->prepare(
-            'SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status
+            'SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status, p.refunded_amount, p.refund_date,
+                    i.invoice_number, l.lease_id
              FROM payment_attempt pa
              JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
              JOIN lease l ON l.lease_id = i.lease_id
@@ -1382,8 +2019,11 @@ function paymentList(PDO $pdo, array $user): array
 
     $tenantId = tenantIdForUser($pdo, $user);
     $statement = $pdo->prepare(
-        'SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status
+        'SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status, p.refunded_amount, p.refund_date,
+                i.invoice_number, l.lease_id
          FROM payment_attempt pa
+         JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
+         JOIN lease l ON l.lease_id = i.lease_id
          LEFT JOIN payment p ON p.attempt_id = pa.attempt_id
          WHERE pa.tenant_id = :tenant_id
          ORDER BY pa.initiated_at DESC',
@@ -1394,19 +2034,15 @@ function paymentList(PDO $pdo, array $user): array
 
 function paymentInitiate(PDO $pdo, array $user, array $input): array
 {
+    if (($user['role'] ?? null) !== 'tenant') {
+        throw new ApiException(403, 'Only a tenant on the lease can initiate a payment attempt.');
+    }
     $invoiceId = (int) ($input['invoice_id'] ?? 0);
     if ($invoiceId <= 0) {
         throw new ApiException(422, 'Invoice ID is required.');
     }
     if (!invoiceBelongsToUser($pdo, $invoiceId, $user)) {
         throw new ApiException(403, 'You do not have access to this invoice.');
-    }
-
-    $invoice = $pdo->prepare('SELECT * FROM rent_invoice WHERE invoice_id = :invoice_id LIMIT 1');
-    $invoice->execute(['invoice_id' => $invoiceId]);
-    $invoiceRow = $invoice->fetch();
-    if (!$invoiceRow) {
-        throw new ApiException(404, 'Invoice not found.');
     }
 
     $tenantId = 0;
@@ -1422,49 +2058,281 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
     }
 
     $method = strtolower(trim((string) ($input['payment_method'] ?? 'card')));
-    $gatewayName = trim((string) ($input['gateway_name'] ?? 'manual'));
-    $gatewayReference = trim((string) ($input['gateway_reference'] ?? 'PAY-' . uniqid('', true)));
-    $amount = (float) ($input['amount'] ?? $invoiceRow['total_amount'] ?? 0);
-    $attemptStatus = strtolower(trim((string) ($input['attempt_status'] ?? 'pending')));
+    $gatewayName = 'unconfigured';
+    $gatewayReference = 'ATT-' . bin2hex(random_bytes(16));
     if (!in_array($method, ['card', 'bank_transfer', 'e_wallet', 'cash', 'other'], true)) {
         throw new ApiException(422, 'Payment method is invalid.');
     }
-
-    $statement = $pdo->prepare(
-        'INSERT INTO payment_attempt (invoice_id, tenant_id, gateway_name, gateway_reference, amount, payment_method, attempt_status, initiated_at, completed_at)
-         VALUES (:invoice_id, :tenant_id, :gateway_name, :gateway_reference, :amount, :payment_method, :attempt_status, NOW(), :completed_at)',
-    );
-    $statement->execute([
-        'invoice_id' => $invoiceId,
-        'tenant_id' => $tenantId,
-        'gateway_name' => $gatewayName,
-        'gateway_reference' => $gatewayReference,
-        'amount' => number_format($amount, 2, '.', ''),
-        'payment_method' => $method,
-        'attempt_status' => $attemptStatus,
-        'completed_at' => in_array($attemptStatus, ['successful', 'failed', 'cancelled', 'expired'], true) ? date('Y-m-d H:i:s') : null,
-    ]);
-
-    $attemptId = (int) $pdo->lastInsertId();
-    if ($attemptStatus === 'successful') {
-        $receiptNumber = 'RCPT-' . uniqid('', true);
-        $transactionReference = 'TXN-' . uniqid('', true);
-        $paymentInsert = $pdo->prepare(
-            'INSERT INTO payment (attempt_id, amount_paid, transaction_reference, receipt_number, payment_status, payment_date)
-             VALUES (:attempt_id, :amount_paid, :transaction_reference, :receipt_number, :payment_status, NOW())',
+    $amountInput = $input['amount'] ?? null;
+    if ($amountInput !== null && (!is_numeric($amountInput) || (float) $amountInput <= 0)) {
+        throw new ApiException(422, 'Payment amount must be greater than zero.');
+    }
+    $pdo->beginTransaction();
+    try {
+        $invoice = $pdo->prepare('SELECT * FROM rent_invoice WHERE invoice_id = :invoice_id FOR UPDATE');
+        $invoice->execute(['invoice_id' => $invoiceId]);
+        $invoiceRow = $invoice->fetch();
+        if (!$invoiceRow) {
+            throw new ApiException(404, 'Invoice not found.');
+        }
+        $amount = (float) ($amountInput ?? $invoiceRow['total_amount']);
+        $paid = $pdo->prepare(
+            "SELECT COALESCE(SUM(p.amount_paid - p.refunded_amount), 0)
+             FROM payment p JOIN payment_attempt pa ON pa.attempt_id = p.attempt_id
+             WHERE pa.invoice_id = :invoice_id AND p.payment_status <> 'reversed'",
         );
-        $paymentInsert->execute([
+        $paid->execute(['invoice_id' => $invoiceId]);
+        $alreadyPaid = (float) $paid->fetchColumn();
+        $outstanding = max(0, (float) $invoiceRow['total_amount'] - $alreadyPaid);
+        if ($amount > $outstanding) {
+            throw new ApiException(422, 'Payment amount cannot exceed the invoice balance.');
+        }
+
+        $statement = $pdo->prepare(
+            'INSERT INTO payment_attempt (invoice_id, tenant_id, gateway_name, gateway_reference, amount, payment_method, attempt_status, initiated_at, completed_at)
+             VALUES (:invoice_id, :tenant_id, :gateway_name, :gateway_reference, :amount, :payment_method, :attempt_status, NOW(), :completed_at)',
+        );
+        $statement->execute([
+            'invoice_id' => $invoiceId,
+            'tenant_id' => $tenantId,
+            'gateway_name' => $gatewayName,
+            'gateway_reference' => $gatewayReference,
+            'amount' => number_format($amount, 2, '.', ''),
+            'payment_method' => $method,
+            'attempt_status' => 'pending',
+            'completed_at' => null,
+        ]);
+        $attemptId = (int) $pdo->lastInsertId();
+        recordAudit($pdo, $user, 'payment_attempt_created', 'payment_attempt', $attemptId, [
+            'invoice_id' => $invoiceId,
+            'amount' => $amount,
+            'payment_method' => $method,
+            'attempt_status' => 'pending',
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+
+    $row = $pdo->prepare('SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status FROM payment_attempt pa LEFT JOIN payment p ON p.attempt_id = pa.attempt_id WHERE pa.attempt_id = :attempt_id LIMIT 1');
+    $row->execute(['attempt_id' => $attemptId]);
+    return ['status' => 201, 'body' => $row->fetch()];
+}
+
+function paymentConfirm(PDO $pdo, array $user, int $attemptId, array $input): array
+{
+    $landlordId = landlordIdForUser($pdo, $user);
+    $reference = trim((string) ($input['transaction_reference'] ?? ''));
+    $pdo->beginTransaction();
+    try {
+        $invoiceIdQuery = $pdo->prepare(
+            'SELECT invoice_id FROM payment_attempt WHERE attempt_id = :attempt_id LIMIT 1',
+        );
+        $invoiceIdQuery->execute(['attempt_id' => $attemptId]);
+        $invoiceId = $invoiceIdQuery->fetchColumn();
+        if (!$invoiceId) {
+            throw new ApiException(404, 'Payment attempt not found.');
+        }
+        $invoiceLock = $pdo->prepare(
+            'SELECT invoice_id FROM rent_invoice WHERE invoice_id = :invoice_id FOR UPDATE',
+        );
+        $invoiceLock->execute(['invoice_id' => $invoiceId]);
+        if (!$invoiceLock->fetchColumn()) {
+            throw new ApiException(404, 'Invoice not found.');
+        }
+        $statement = $pdo->prepare(
+            'SELECT pa.*, i.total_amount, a.landlord_id
+             FROM payment_attempt pa
+             JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
+             JOIN lease l ON l.lease_id = i.lease_id
+             JOIN tenant_application a ON a.application_id = l.application_id
+             WHERE pa.attempt_id = :attempt_id FOR UPDATE',
+        );
+        $statement->execute(['attempt_id' => $attemptId]);
+        $attempt = $statement->fetch();
+        if (!$attempt) {
+            throw new ApiException(404, 'Payment attempt not found.');
+        }
+        if ((int) $attempt['landlord_id'] !== $landlordId) {
+            throw new ApiException(403, 'You do not have access to this payment attempt.');
+        }
+        if ($attempt['attempt_status'] !== 'pending') {
+            throw new ApiException(409, 'Only pending payment attempts can be confirmed.');
+        }
+        if (!in_array($attempt['payment_method'], ['cash', 'bank_transfer', 'other'], true)) {
+            throw new ApiException(422, 'Card and e-wallet payments require a configured gateway verification callback.');
+        }
+        $paid = $pdo->prepare(
+            "SELECT COALESCE(SUM(p.amount_paid - p.refunded_amount), 0)
+             FROM payment p JOIN payment_attempt pa ON pa.attempt_id = p.attempt_id
+             WHERE pa.invoice_id = :invoice_id AND p.payment_status <> 'reversed'",
+        );
+        $paid->execute(['invoice_id' => $attempt['invoice_id']]);
+        $alreadyPaid = (float) $paid->fetchColumn();
+        $outstanding = max(0, (float) $attempt['total_amount'] - $alreadyPaid);
+        $amount = (float) $attempt['amount'];
+        if ($amount <= 0 || $amount > $outstanding) {
+            throw new ApiException(409, 'The invoice balance changed and this payment attempt cannot be confirmed for that amount.');
+        }
+        $transactionReference = $reference !== '' ? $reference : 'MAN-' . bin2hex(random_bytes(12));
+        $receiptNumber = 'RCPT-' . gmdate('Ymd') . '-' . strtoupper(bin2hex(random_bytes(5)));
+        $pdo->prepare(
+            "UPDATE payment_attempt SET attempt_status = 'successful', completed_at = NOW()
+             WHERE attempt_id = :attempt_id",
+        )->execute(['attempt_id' => $attemptId]);
+        $pdo->prepare(
+            'INSERT INTO payment (attempt_id, amount_paid, refunded_amount, transaction_reference, receipt_number, payment_status, payment_date)
+             VALUES (:attempt_id, :amount_paid, 0, :transaction_reference, :receipt_number, :payment_status, NOW())',
+        )->execute([
             'attempt_id' => $attemptId,
             'amount_paid' => number_format($amount, 2, '.', ''),
             'transaction_reference' => $transactionReference,
             'receipt_number' => $receiptNumber,
             'payment_status' => 'completed',
         ]);
+        $newPaid = $alreadyPaid + $amount;
+        $newStatus = $newPaid >= (float) $attempt['total_amount'] ? 'paid' : 'partially_paid';
+        $pdo->prepare('UPDATE rent_invoice SET invoice_status = :status WHERE invoice_id = :invoice_id')
+            ->execute(['status' => $newStatus, 'invoice_id' => $attempt['invoice_id']]);
+        recordAudit($pdo, $user, 'payment_confirmed', 'payment_attempt', $attemptId, [
+            'invoice_id' => (int) $attempt['invoice_id'],
+            'amount' => $amount,
+            'receipt_number' => $receiptNumber,
+            'payment_method' => $attempt['payment_method'],
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
     }
-
-    $row = $pdo->prepare('SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status FROM payment_attempt pa LEFT JOIN payment p ON p.attempt_id = pa.attempt_id WHERE pa.attempt_id = :attempt_id LIMIT 1');
+    $row = $pdo->prepare(
+        'SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status
+         FROM payment_attempt pa LEFT JOIN payment p ON p.attempt_id = pa.attempt_id
+         WHERE pa.attempt_id = :attempt_id LIMIT 1',
+    );
     $row->execute(['attempt_id' => $attemptId]);
     return ['status' => 201, 'body' => $row->fetch()];
+}
+
+function paymentAttemptCancel(PDO $pdo, array $user, int $attemptId): array
+{
+    $tenantId = tenantIdForUser($pdo, $user);
+    $statement = $pdo->prepare(
+        'SELECT attempt_id, tenant_id, attempt_status FROM payment_attempt WHERE attempt_id = :attempt_id LIMIT 1',
+    );
+    $statement->execute(['attempt_id' => $attemptId]);
+    $attempt = $statement->fetch();
+    if (!$attempt) {
+        throw new ApiException(404, 'Payment attempt not found.');
+    }
+    if ((int) $attempt['tenant_id'] !== $tenantId) {
+        throw new ApiException(403, 'You do not have access to this payment attempt.');
+    }
+    if ($attempt['attempt_status'] !== 'pending') {
+        throw new ApiException(409, 'Only pending payment attempts can be cancelled.');
+    }
+    $pdo->prepare(
+        "UPDATE payment_attempt SET attempt_status = 'cancelled', completed_at = NOW()
+         WHERE attempt_id = :attempt_id AND attempt_status = 'pending'",
+    )->execute(['attempt_id' => $attemptId]);
+    recordAudit($pdo, $user, 'payment_attempt_cancelled', 'payment_attempt', $attemptId, []);
+    return paymentStatusGet($pdo, $user, $attemptId);
+}
+
+function paymentRefund(PDO $pdo, array $user, int $attemptId, array $input): array
+{
+    $landlordId = landlordIdForUser($pdo, $user);
+    $reason = trim((string) ($input['reason'] ?? ''));
+    if ($reason === '') {
+        throw new ApiException(422, 'A refund reason is required.');
+    }
+    $pdo->beginTransaction();
+    try {
+        $invoiceIdQuery = $pdo->prepare(
+            'SELECT invoice_id FROM payment_attempt WHERE attempt_id = :attempt_id LIMIT 1',
+        );
+        $invoiceIdQuery->execute(['attempt_id' => $attemptId]);
+        $invoiceId = $invoiceIdQuery->fetchColumn();
+        if (!$invoiceId) {
+            throw new ApiException(404, 'Confirmed payment not found.');
+        }
+        $invoiceLock = $pdo->prepare(
+            'SELECT invoice_id FROM rent_invoice WHERE invoice_id = :invoice_id FOR UPDATE',
+        );
+        $invoiceLock->execute(['invoice_id' => $invoiceId]);
+        if (!$invoiceLock->fetchColumn()) {
+            throw new ApiException(404, 'Invoice not found.');
+        }
+        $statement = $pdo->prepare(
+            'SELECT p.*, pa.invoice_id, a.landlord_id, i.total_amount
+             FROM payment p JOIN payment_attempt pa ON pa.attempt_id = p.attempt_id
+             JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
+             JOIN lease l ON l.lease_id = i.lease_id
+             JOIN tenant_application a ON a.application_id = l.application_id
+             WHERE pa.attempt_id = :attempt_id FOR UPDATE',
+        );
+        $statement->execute(['attempt_id' => $attemptId]);
+        $payment = $statement->fetch();
+        if (!$payment) {
+            throw new ApiException(404, 'Confirmed payment not found.');
+        }
+        if ((int) $payment['landlord_id'] !== $landlordId) {
+            throw new ApiException(403, 'You do not have access to this payment.');
+        }
+        $refundAmount = $input['amount'] ?? $payment['amount_paid'];
+        if (!is_numeric($refundAmount) || (float) $refundAmount <= 0
+            || (float) $refundAmount > (float) $payment['amount_paid'] - (float) $payment['refunded_amount']) {
+            throw new ApiException(422, 'Refund amount must be positive and no greater than the unrefunded payment amount.');
+        }
+        $newRefund = (float) $payment['refunded_amount'] + (float) $refundAmount;
+        $newPaymentStatus = $newRefund >= (float) $payment['amount_paid'] ? 'refunded' : 'completed';
+        $pdo->prepare(
+            'INSERT INTO payment_refund (payment_id, amount, reason, refunded_by)
+             VALUES (:payment_id, :amount, :reason, :refunded_by)',
+        )->execute([
+            'payment_id' => $payment['payment_id'],
+            'amount' => number_format((float) $refundAmount, 2, '.', ''),
+            'reason' => $reason,
+            'refunded_by' => $user['user_id'],
+        ]);
+        $pdo->prepare(
+            'UPDATE payment SET refunded_amount = :refunded_amount, payment_status = :payment_status,
+                    refund_date = CURDATE(), refund_reason = :refund_reason
+             WHERE payment_id = :payment_id',
+        )->execute([
+            'refunded_amount' => number_format($newRefund, 2, '.', ''),
+            'payment_status' => $newPaymentStatus,
+            'refund_reason' => $reason,
+            'payment_id' => $payment['payment_id'],
+        ]);
+        $sum = $pdo->prepare(
+            "SELECT COALESCE(SUM(amount_paid - refunded_amount), 0)
+             FROM payment p JOIN payment_attempt pa ON pa.attempt_id = p.attempt_id
+             WHERE pa.invoice_id = :invoice_id AND p.payment_status IN ('completed', 'refunded')",
+        );
+        $sum->execute(['invoice_id' => $payment['invoice_id']]);
+        $netPaid = (float) $sum->fetchColumn();
+        $status = $netPaid >= (float) $payment['total_amount'] ? 'paid' : ($netPaid > 0 ? 'partially_paid' : 'unpaid');
+        $pdo->prepare('UPDATE rent_invoice SET invoice_status = :status WHERE invoice_id = :invoice_id')
+            ->execute(['status' => $status, 'invoice_id' => $payment['invoice_id']]);
+        recordAudit($pdo, $user, 'payment_refunded', 'payment', (int) $payment['payment_id'], [
+            'refund_amount' => (float) $refundAmount,
+            'refund_reason' => $reason,
+            'invoice_id' => (int) $payment['invoice_id'],
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+    return paymentStatusGet($pdo, $user, $attemptId);
 }
 
 function paymentStatusGet(PDO $pdo, array $user, int $attemptId): array
@@ -1484,16 +2352,31 @@ function paymentStatusGet(PDO $pdo, array $user, int $attemptId): array
     if (!invoiceBelongsToUser($pdo, (int) $payment['invoice_id'], $user)) {
         throw new ApiException(403, 'You do not have access to this payment.');
     }
+    if ($payment['payment_id'] !== null) {
+        $payment['refunds'] = paymentRefundHistory($pdo, (int) $payment['payment_id']);
+    }
 
     return ['status' => 200, 'body' => $payment];
+}
+
+function paymentRefundHistory(PDO $pdo, int $paymentId): array
+{
+    $statement = $pdo->prepare(
+        'SELECT amount, reason, refunded_at
+         FROM payment_refund WHERE payment_id = :payment_id ORDER BY refunded_at, refund_id',
+    );
+    $statement->execute(['payment_id' => $paymentId]);
+    return $statement->fetchAll();
 }
 
 function paymentReceiptGet(PDO $pdo, array $user, int $attemptId): array
 {
     $statement = $pdo->prepare(
-        'SELECT pa.*, p.*
+        'SELECT pa.*, p.*, i.invoice_number, i.lease_id, i.total_amount AS invoice_total,
+                i.billing_period_start, i.billing_period_end
          FROM payment_attempt pa
          JOIN payment p ON p.attempt_id = pa.attempt_id
+         JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
          WHERE pa.attempt_id = :attempt_id LIMIT 1',
     );
     $statement->execute(['attempt_id' => $attemptId]);
@@ -1504,6 +2387,7 @@ function paymentReceiptGet(PDO $pdo, array $user, int $attemptId): array
     if (!invoiceBelongsToUser($pdo, (int) $payment['invoice_id'], $user)) {
         throw new ApiException(403, 'You do not have access to this receipt.');
     }
+    $payment['refunds'] = paymentRefundHistory($pdo, (int) $payment['payment_id']);
 
     return ['status' => 200, 'body' => ['receipt' => $payment]];
 }

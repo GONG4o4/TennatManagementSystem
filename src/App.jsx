@@ -72,6 +72,13 @@ const statusClasses = {
   'Not applicable': 'border-slate-200 bg-slate-100 text-slate-700',
 };
 
+function monthlyDueDate(periodDate, dueDay) {
+  if (!periodDate || !dueDay) return '';
+  const [year, month] = periodDate.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, '0')}-${String(Math.min(Number(dueDay), lastDay)).padStart(2, '0')}`;
+}
+
 function App() {
   const { user } = useAuth();
 
@@ -125,6 +132,19 @@ function App() {
         <Route path="settings" element={<TenantSettingsPage />} />
       </Route>
 
+      <Route
+        path="/applicant"
+        element={
+          <ProtectedRoute role="applicant">
+            <ApplicantLayout />
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<TenantApplicationsPage />} />
+        <Route path="applications" element={<TenantApplicationsPage />} />
+        <Route path="rentals" element={<TenantRentalsPage />} />
+      </Route>
+
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
@@ -135,7 +155,10 @@ function RootRedirect({ user }) {
     return <Navigate to="/login" replace />;
   }
 
-  return <Navigate to={user.role === 'landlord' ? '/landlord' : '/tenant'} replace />;
+  const destination = user.role === 'landlord' ? '/landlord'
+    : user.role === 'applicant' ? '/applicant'
+      : '/tenant';
+  return <Navigate to={destination} replace />;
 }
 
 function ProtectedRoute({ children, role }) {
@@ -150,7 +173,7 @@ function ProtectedRoute({ children, role }) {
   }
 
   if (role && user.role !== role) {
-    return <Navigate to="/unauthorized" replace />;
+    return <Navigate to="/" replace />;
   }
 
   return children;
@@ -187,11 +210,7 @@ function LoginPage() {
 
     try {
       const user = await login({ ...form });
-      if (user?.role === 'landlord') {
-        navigate('/landlord');
-      } else {
-        navigate('/tenant');
-      }
+      navigate(user?.role === 'landlord' ? '/landlord' : user?.role === 'applicant' ? '/applicant' : '/tenant');
     } catch (err) {
       setError(err.message || 'Authentication failed.');
     }
@@ -295,7 +314,7 @@ function RegisterPage() {
     setError('');
     try {
       const user = await register(state);
-      navigate(user.role === 'landlord' ? '/landlord' : '/tenant');
+      navigate(user.role === 'landlord' ? '/landlord' : user.role === 'applicant' ? '/applicant' : '/tenant');
     } catch (registerError) {
       setError(registerError.message || 'Account registration failed.');
     }
@@ -512,6 +531,69 @@ function LandlordLayout() {
   );
 }
 
+function ApplicantLayout() {
+  const { logout, user } = useAuth();
+  const navigate = useNavigate();
+  const { data, loading, error } = useWorkspace();
+  const accountName = user?.name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.email || 'Applicant';
+  const navItems = [
+    { label: 'Applications', to: '/applicant/applications', icon: FolderKanban },
+    { label: 'Available rentals', to: '/applicant/rentals', icon: Building2 },
+  ];
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  return (
+    <div className="flex min-h-screen bg-slate-100">
+      <aside className="hidden w-72 border-r border-slate-200 bg-white lg:flex lg:flex-col">
+        <div className="border-b border-slate-200 p-4">
+          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Rental portal</p>
+          <p className="text-lg font-bold text-slate-900">Applicant</p>
+        </div>
+        <nav className="flex-1 space-y-1 p-3">
+          {navItems.map(({ label, to, icon: Icon }) => (
+            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+              <Icon className="h-4 w-4" /> {label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="border-t border-slate-200 p-3">
+          <button onClick={handleLogout} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100">
+            <LogOut className="h-4 w-4" /> Logout
+          </button>
+        </div>
+      </aside>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Applicant portal</p>
+            <h1 className="text-xl font-bold text-slate-900">Rental applications</h1>
+          </div>
+          <div className="text-right">
+            <p className="text-sm font-semibold text-slate-900">{accountName}</p>
+            <p className="text-xs text-slate-500">Applicant</p>
+          </div>
+        </header>
+        <nav className="flex gap-2 border-b border-slate-200 bg-white p-3 lg:hidden">
+          {navItems.map(({ label, to, icon: Icon }) => (
+            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+              <Icon className="h-4 w-4" /> {label}
+            </NavLink>
+          ))}
+          <button onClick={handleLogout} className="ml-auto rounded-xl px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">Logout</button>
+        </nav>
+        <main className="flex-1 space-y-4 p-4 sm:p-6">
+          <PreviewNotice loading={loading} error={error} />
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
+
 function TenantLayout() {
   const { logout, user } = useAuth();
   const { data, loading, error } = useWorkspace();
@@ -617,14 +699,14 @@ function LandlordDashboardPage() {
   const occupiedCount = data.units.filter((item) => ['occupied', 'Occupied'].includes(item.status)).length;
   const unpaidTotal = data.invoices.filter((item) => ['unpaid', 'overdue', 'partially_paid', 'Unpaid', 'Partial'].includes(item.status)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const dashboardStats = [
-    { label: 'Total Properties', value: data.properties.length, delta: 'In this portfolio', tone: 'emerald' },
-    { label: 'Total Rental Units', value: data.units.length, delta: `${occupiedCount} currently occupied`, tone: 'sky' },
-    { label: 'Occupied Units', value: occupiedCount, delta: data.units.length ? `${Math.round((occupiedCount / data.units.length) * 100)}% occupancy` : 'No units yet', tone: 'violet' },
-    { label: 'Available Units', value: data.units.filter((item) => ['vacant', 'Available'].includes(item.status)).length, delta: 'Ready to lease', tone: 'amber' },
-    { label: 'Active Leases', value: activeLeaseCount, delta: 'Current agreements', tone: 'emerald' },
-    { label: 'Pending Applications', value: data.applications.filter((item) => ['Submitted', 'Under Review', 'Screening'].includes(item.status)).length, delta: 'Awaiting review', tone: 'rose' },
-    { label: 'Unpaid Invoices', value: `$${unpaidTotal.toLocaleString()}`, delta: 'Outstanding total', tone: 'amber' },
-    { label: 'Monthly Income', value: `$${data.leases.filter((item) => item.status === 'Active').reduce((sum, item) => sum + Number(item.rent || 0), 0).toLocaleString()}`, delta: 'Based on active leases', tone: 'sky' },
+    { label: 'Total Properties', value: data.properties.length, delta: 'In this portfolio', tone: 'emerald', to: '/landlord/properties' },
+    { label: 'Total Rental Units', value: data.units.length, delta: `${occupiedCount} currently occupied`, tone: 'sky', to: '/landlord/units' },
+    { label: 'Occupied Units', value: occupiedCount, delta: data.units.length ? `${Math.round((occupiedCount / data.units.length) * 100)}% occupancy` : 'No units yet', tone: 'violet', to: '/landlord/units' },
+    { label: 'Available Units', value: data.units.filter((item) => ['vacant', 'Available'].includes(item.status)).length, delta: 'Ready to lease', tone: 'amber', to: '/landlord/units' },
+    { label: 'Active Leases', value: activeLeaseCount, delta: 'Current agreements', tone: 'emerald', to: '/landlord/leases' },
+    { label: 'Pending Applications', value: data.applications.filter((item) => ['Submitted', 'Under Review', 'Screening'].includes(item.status)).length, delta: 'Awaiting review', tone: 'rose', to: '/landlord/applications' },
+    { label: 'Unpaid Invoices', value: `$${unpaidTotal.toLocaleString()}`, delta: 'Outstanding total', tone: 'amber', to: '/landlord/invoices' },
+    { label: 'Monthly Income', value: `$${data.leases.filter((item) => item.status === 'Active').reduce((sum, item) => sum + Number(item.rent || 0), 0).toLocaleString()}`, delta: 'Based on active leases', tone: 'sky', to: '/landlord/invoices' },
   ];
   const recentPayments = data.paymentHistory.slice(0, 3);
   const occupancyData = [
@@ -642,7 +724,15 @@ function LandlordDashboardPage() {
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {dashboardStats.map((item) => (
-          <SummaryCard key={item.label} {...item} />
+          <button
+            key={item.label}
+            type="button"
+            className="rounded-2xl text-left transition hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
+            aria-label={`View ${item.label}`}
+            onClick={() => navigate(item.to)}
+          >
+            <SummaryCard {...item} />
+          </button>
         ))}
       </div>
 
@@ -777,6 +867,8 @@ function PropertiesPage() {
   const fields = [
     { name: 'name', label: 'Property name', required: true },
     { name: 'type', label: 'Property type', type: 'select', options: ['apartment', 'house', 'condo', 'townhouse', 'boarding_house', 'commercial', 'other'], required: true },
+    { name: 'rentalClassification', label: 'Rental classification', type: 'select', options: [{ value: 'unknown', label: 'Not confirmed — requires manual verification' }, { value: 'residential', label: 'Residential' }, { value: 'commercial', label: 'Commercial' }], required: true },
+    { name: 'constructionDate', label: 'Property construction date', type: 'date' },
     { name: 'address', label: 'Address', type: 'textarea', required: true },
     { name: 'description', label: 'Description', type: 'textarea' },
   ];
@@ -820,12 +912,14 @@ function PropertiesPage() {
         open={dialogOpen}
         title={editing ? 'Edit property' : 'Add property'}
         fields={fields}
-        initialValues={editing || { name: '', type: 'apartment', address: '', description: '' }}
+        initialValues={editing || { name: '', type: 'apartment', rentalClassification: 'unknown', constructionDate: '', address: '', description: '' }}
         onClose={() => setDialogOpen(false)}
         onSubmit={async (values) => {
           const payload = {
             property_name: values.name,
             property_type: values.type,
+            rental_classification: values.rentalClassification,
+            construction_date: values.constructionDate || null,
             address: values.address,
             description: values.description,
           };
@@ -863,7 +957,8 @@ function RentalUnitsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Rental units" subtitle="Track occupancy, upcoming leases, and unit details by property." action={<button className="primary-btn" onClick={() => { setEditing(null); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> Add unit</button>} />
+      <PageHeader title="Rental units" subtitle="Track occupancy, upcoming leases, and unit details by property." action={<button className="primary-btn" disabled={!data.properties.length} title={!data.properties.length ? 'Add a property before creating a rental unit.' : undefined} onClick={() => { setEditing(null); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> Add unit</button>} />
+      {!data.properties.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Create a property before adding a rental unit. <NavLink className="font-semibold underline" to="/landlord/properties">Add a property</NavLink>.</div>}
       <SearchFilterBar query={query} onQueryChange={setQuery} placeholder="Search units and properties" />
       <div className="grid gap-4 xl:grid-cols-3">
         {visibleUnits.map((unit) => (
@@ -1131,7 +1226,7 @@ function ScreeningPage() {
               <span>Evaluation data</span>
               <span className="font-semibold text-slate-900">Available per application</span>
             </div>
-            <button className="primary-btn mt-5 w-full" disabled={!criterion.active || !activeApplications.length} onClick={() => setSelectedCriterion(criterion)}>Evaluate applicants</button>
+            <button className="primary-btn mt-5 w-full" disabled={!criterion.active || !activeApplications.length} title={!criterion.active ? 'Enable this criterion before evaluating applicants.' : !activeApplications.length ? 'There are no submitted applications to evaluate.' : undefined} onClick={() => setSelectedCriterion(criterion)}>Evaluate applicants</button>
           </div>
         ))}
       </div>
@@ -1174,22 +1269,166 @@ function ScreeningPage() {
   );
 }
 
+function printLeaseAgreement(lease, popup = window.open('', '_blank')) {
+  if (!popup) {
+    window.alert('Allow pop-ups to print the lease agreement.');
+    return;
+  }
+  popup.opener = null;
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character]));
+  const landlord = `${lease.landlord_first_name || ''} ${lease.landlord_last_name || ''}`.trim();
+  const tenant = `${lease.tenant_first_name || ''} ${lease.tenant_last_name || ''}`.trim();
+  popup.document.open();
+  popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Lease agreement ${escapeHtml(lease.lease_id)}</title>
+    <style>body{font:15px Arial,sans-serif;line-height:1.55;color:#172033;max-width:800px;margin:36px auto;padding:0 24px}h1,h2{color:#12382d}h1{text-align:center}section{margin:24px 0;border-bottom:1px solid #d5dce3;padding-bottom:16px}.signatures{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:64px}.signature{border-top:1px solid #333;padding-top:8px}.notice{background:#fff8df;border:1px solid #e8d18a;padding:12px}@media print{body{margin:18mm auto;padding:0}.notice{background:white}}</style></head><body>
+    <h1>Residential Lease Agreement</h1>
+    <p class="notice"><strong>Draft for review.</strong> This generated document is a convenience and is not represented as legally sufficient. Obtain review by a qualified Philippine legal professional before signing.</p>
+    <section><h2>Parties and premises</h2><p><strong>Landlord:</strong> ${escapeHtml(landlord)}${lease.business_name ? ` (${escapeHtml(lease.business_name)})` : ''}</p><p><strong>Landlord contact:</strong> ${escapeHtml(lease.landlord_email)} · ${escapeHtml(lease.landlord_phone)}</p><p><strong>Tenant:</strong> ${escapeHtml(tenant)}</p><p><strong>Tenant contact:</strong> ${escapeHtml(lease.tenant_email)} · ${escapeHtml(lease.tenant_phone)}</p><p><strong>Property:</strong> ${escapeHtml(lease.property_name)} — ${escapeHtml(lease.address)}</p><p><strong>Unit:</strong> ${escapeHtml(lease.unit_number)}</p></section>
+    <section><h2>Term and payment</h2><p><strong>Lease term:</strong> ${escapeHtml(lease.lease_start_date)} to ${escapeHtml(lease.lease_end_date)}</p><p><strong>Monthly rent:</strong> PHP ${Number(lease.monthly_rent || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p><p><strong>Advance rent:</strong> PHP ${Number(lease.advance_payment || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p><p><strong>Security deposit:</strong> PHP ${Number(lease.security_deposit || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p><p><strong>Rent due:</strong> Day ${escapeHtml(lease.payment_due_day)} of each month; when that day does not exist in a month, payment is due on that month's last day.</p></section>
+    <section><h2>Responsibilities</h2><p>The landlord will provide the premises in the condition agreed by the parties and handle landlord responsibilities required by the lease and applicable law.</p><p>The tenant will pay agreed rent, take reasonable care of the premises, report needed repairs, and meet the tenant responsibilities in the signed agreement.</p></section>
+    <section><h2>Subleasing</h2><p>Assignment or subleasing requires the landlord's written consent where required by applicable law and this agreement. Any consent should be retained with the lease records.</p></section>
+    <section><h2>Termination</h2><p>Termination must follow the lease and applicable law. This document does not authorize lockouts, self-help eviction, or automatic termination because an invoice is overdue.</p></section>
+    <div class="signatures"><div class="signature">Landlord signature / printed name / date</div><div class="signature">Tenant signature / printed name / date</div></div>
+    <script>window.addEventListener('load',()=>window.print())</script></body></html>`);
+  popup.document.close();
+}
+
+function printPaymentReceipt(receipt, popup) {
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character]));
+  const refunds = Array.isArray(receipt.refunds) ? receipt.refunds : [];
+  const refundHistory = refunds.length
+    ? `<h2>Refund history</h2><ul>${refunds.map((refund) => `<li>${escapeHtml(refund.refunded_at)} · PHP ${Number(refund.amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · ${escapeHtml(refund.reason)}</li>`).join('')}</ul>`
+    : '';
+  popup.opener = null;
+  popup.document.open();
+  popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${escapeHtml(receipt.receipt_number)}</title>
+    <style>body{font:15px Arial,sans-serif;max-width:680px;margin:48px auto;padding:24px;color:#172033}h1{color:#12382d}dl{display:grid;grid-template-columns:180px 1fr;gap:12px;border-top:1px solid #d5dce3;padding-top:20px}dt{color:#667085}dd{margin:0;font-weight:600}</style></head>
+    <body><h1>Payment receipt</h1><p>Receipt number: <strong>${escapeHtml(receipt.receipt_number)}</strong></p><dl>
+    <dt>Payment date</dt><dd>${escapeHtml(receipt.payment_date)}</dd><dt>Amount received</dt><dd>PHP ${Number(receipt.amount_paid || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</dd>
+    <dt>Amount refunded</dt><dd>PHP ${Number(receipt.refunded_amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</dd>
+    <dt>Payment method</dt><dd>${escapeHtml(humanizeStatus(receipt.payment_method))}</dd><dt>Transaction reference</dt><dd>${escapeHtml(receipt.transaction_reference)}</dd>
+    <dt>Invoice</dt><dd>${escapeHtml(receipt.invoice_number)} (#${escapeHtml(receipt.invoice_id)})</dd><dt>Lease</dt><dd>#${escapeHtml(receipt.lease_id)}</dd>
+    </dl>${refundHistory}<p>This receipt records a confirmed payment in TenantFlow.</p><script>window.addEventListener('load',()=>window.print())</script></body></html>`);
+  popup.document.close();
+}
+
 function LeasesPage() {
   const { data, refresh } = useWorkspace();
   const [searchParams] = useSearchParams();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [selectedLease, setSelectedLease] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [query, setQuery] = useState(searchParams.get('q') || '');
   const eligibleApplications = data.applications.filter((item) => item.status === 'Approved' && !data.leases.some((lease) => lease.applicationId === item.id));
-  const fields = [
-    { name: 'applicationId', label: 'Approved application', type: 'select', options: eligibleApplications.map((item) => ({ value: item.id, label: `${item.name} (${item.id})` })), required: true },
-    { name: 'unitId', label: 'Vacant unit', type: 'select', options: data.units.filter((item) => ['vacant', 'Available'].includes(item.status)).map((item) => ({ value: item.id, label: `${item.unitNumber || item.id} — ${item.property || item.propertyId}` })), required: true },
-    { name: 'start', label: 'Lease start', type: 'date', required: true },
-    { name: 'end', label: 'Lease end', type: 'date', required: true },
-    { name: 'rent', label: 'Monthly rent', type: 'number', min: 1, required: true },
-    { name: 'securityDeposit', label: 'Security deposit', type: 'number', min: 0, required: true },
-    { name: 'advancePayment', label: 'Advance payment', type: 'number', min: 0 },
-    { name: 'paymentDueDay', label: 'Payment due day (1–28)', type: 'number', min: 1, max: 28, required: true },
+  const isUnitAvailableForPeriod = (unit, values) => {
+    if (!['vacant', 'reserved', 'occupied', 'Available'].includes(unit.status)) return false;
+    if (!values.start || !values.end || values.end <= values.start) return ['vacant', 'Available'].includes(unit.status);
+    return !data.leases.some((lease) => String(lease.unitId) === String(unit.id)
+      && ['Active', 'Pending'].includes(lease.status)
+      && values.start <= lease.end && values.end >= lease.start);
+  };
+  const selectedApplicant = (values) => eligibleApplications.find((item) => String(item.id) === String(values.applicationId));
+  const selectedUnit = (values) => data.units.find((item) => String(item.id) === String(values.unitId));
+  const selectedProperty = (values) => {
+    const unit = selectedUnit(values);
+    return data.properties.find((item) => String(item.id) === String(unit?.propertyId));
+  };
+  const sections = [
+    {
+      title: 'Tenant and property',
+      description: 'Choose an approved application and the vacant unit for this lease.',
+      fields: [
+        { name: 'applicationId', label: 'Approved application', type: 'select', options: eligibleApplications.map((item) => ({ value: item.id, label: `${item.name} (${item.id})` })), required: true },
+        { name: 'unitId', label: 'Available rental unit', type: 'select', options: (values) => data.units.filter((unit) => isUnitAvailableForPeriod(unit, values)).map((item) => ({ value: item.id, label: `${item.unitNumber || item.id} — ${item.property || item.propertyId}` })), onChangeValues: (nextValues, unitId) => {
+          const unit = data.units.find((item) => String(item.id) === String(unitId));
+          return { ...nextValues, rent: unit?.rent || '', securityDeposit: unit?.deposit || 0 };
+        }, required: true },
+      ],
+      renderSummary: (values) => {
+        const applicant = selectedApplicant(values);
+        const unit = selectedUnit(values);
+        const property = selectedProperty(values);
+        if (!applicant && !unit) return null;
+        return (
+          <div className="sm:col-span-2 grid gap-3 rounded-xl bg-slate-50 p-3 text-sm sm:grid-cols-2">
+            {applicant && <div><p className="text-xs font-medium uppercase tracking-wide text-slate-500">Tenant</p><p className="mt-1 font-medium text-slate-900">{applicant.name}</p><p className="text-slate-600">Application {applicant.id}</p></div>}
+            {unit && <div><p className="text-xs font-medium uppercase tracking-wide text-slate-500">Rental unit</p><p className="mt-1 font-medium text-slate-900">{unit.unitNumber} · {property?.name || unit.property || 'Property unavailable'}</p><p className="text-slate-600">{property?.address || unit.address || ''}</p></div>}
+          </div>
+        );
+      },
+    },
+    {
+      title: 'Lease duration',
+      description: 'Set the start and end dates for the rental agreement.',
+      fields: [
+        { name: 'start', label: 'Lease start date', type: 'date', required: true },
+        { name: 'end', label: 'Lease end date', type: 'date', min: (values) => values.start || undefined, required: true },
+      ],
+    },
+    {
+      title: 'Rental financial terms',
+      description: 'Enter the monthly rent and any upfront payments.',
+      fields: [
+        { name: 'rent', label: 'Monthly rent', type: 'number', min: 1, required: true },
+        { name: 'securityDeposit', label: 'Security deposit', type: 'number', min: 0, required: true },
+        { name: 'advancePayment', label: 'Advance rent', type: 'number', min: 0 },
+      ],
+      renderSummary: (values) => {
+        const initialCollection = Number(values.securityDeposit || 0) + Number(values.advancePayment || 0);
+        return (
+          <div className="sm:col-span-2 rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+            <p className="text-sm font-medium text-emerald-900">Initial rent collection</p>
+            <p className="mt-1 text-xl font-semibold text-emerald-800">PHP {initialCollection.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+            <p className="mt-1 text-xs text-emerald-700">Advance rent plus security deposit. The deposit is tracked separately and is not rent income.</p>
+          </div>
+        );
+      },
+    },
+    {
+      title: 'Payment schedule',
+      description: 'Choose the day of the month when rent is due.',
+      fields: [
+        { name: 'paymentDueDay', label: 'Monthly payment due day (1–31)', type: 'number', min: 1, max: 31, required: true },
+      ],
+      renderSummary: () => <p className="sm:col-span-2 text-xs text-slate-500">Section 7 of RA 9653 generally provides for payment within the first five days of the month, unless the lease agrees on a later payment date. For months with fewer days, payment is due on that month’s last day.</p>,
+    },
+    {
+      title: 'Legal and rental compliance',
+      description: 'Coverage is assessed from the property classification, construction date, rent, continuing-lessee history, and rule effective dates.',
+      fields: [],
+      renderSummary: (values) => {
+        const property = selectedProperty(values);
+        const rule = data.rentalRegulations?.find((item) => item.regulation_code === 'NHSB-2024-01'
+          && (!item.effective_from || !values.start || item.effective_from <= values.start)
+          && (!item.effective_to || !values.start || item.effective_to >= values.start));
+        const classification = property?.rentalClassification || 'unknown';
+        const missingInfo = !property || classification === 'unknown' || !property.constructionDate;
+        const expired = values.start && !rule;
+        const verificationRequired = rule?.verification_status !== 'verified' || !rule?.new_construction_cutoff;
+        const outOfScope = classification === 'commercial'
+          || (rule && Number(values.rent || 0) > Number(rule.monthly_rent_ceiling || 0))
+          || (rule?.new_construction_cutoff && property?.constructionDate > rule.new_construction_cutoff);
+        const assessment = outOfScope ? 'Not covered by the configured residential rule'
+          : missingInfo || expired || verificationRequired ? 'Requires manual verification'
+            : 'Coverage candidate — verify continuing-lessee status';
+        return (
+          <div className="sm:col-span-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
+            <p className="font-semibold text-amber-900">Assessment: {assessment}</p>
+            <div className="mt-2 grid gap-2 text-amber-800 sm:grid-cols-2">
+              <p>Classification: {classification}</p>
+              <p>Construction date: {property?.constructionDate || 'Not recorded'}</p>
+              <p>Configured rule: {rule?.title || 'No verified successor rule configured'}</p>
+              <p>Effective period: {rule?.effective_from || 'Unconfirmed'} to {rule?.effective_to || 'No configured end date'}</p>
+            </div>
+            <p className="mt-3 text-xs text-amber-800">Regulatory coverage and the resolution’s new-construction cutoff require confirmation against authoritative guidance. This assessment is not a legal guarantee.</p>
+          </div>
+        );
+      },
+    },
   ];
   const createLease = async (values) => {
     const applicant = data.applications.find((item) => item.id === values.applicationId);
@@ -1225,8 +1464,8 @@ function LeasesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Leases" subtitle="Create, review, and manage active, pending, and ended rental agreements." action={<button className="primary-btn" disabled={!eligibleApplications.length} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> New lease</button>} />
-      {!eligibleApplications.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">A lease can be created only after an application is approved and an unassigned unit is available.</div>}
+      <PageHeader title="Leases" subtitle="Create, review, and manage active, pending, and ended rental agreements." action={<button className="primary-btn" disabled={!eligibleApplications.length || !data.units.some((unit) => ['vacant', 'Available'].includes(unit.status))} title={!eligibleApplications.length ? 'An approved application is required to create a lease.' : undefined} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> New lease</button>} />
+      {!eligibleApplications.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Approve an application that is not already linked to a lease before creating a lease.</div>}
       <div className="grid gap-3 sm:grid-cols-[1fr_14rem]">
         <SearchFilterBar query={query} onQueryChange={setQuery} placeholder="Search leases, tenants, or units" />
         <select className="field" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All lease statuses</option>{['pending', 'active', 'ended', 'terminated', 'cancelled'].map((status) => <option key={status} value={status}>{status}</option>)}</select>
@@ -1245,10 +1484,27 @@ function LeasesPage() {
               <p><span className="text-slate-400">Tenant</span> <span className="font-medium text-slate-900">{lease.tenant}</span></p>
               <p><span className="text-slate-400">Unit</span> <span className="font-medium text-slate-900">{lease.unit}</span></p>
               <p><span className="text-slate-400">Dates</span> <span className="font-medium text-slate-900">{lease.start} to {lease.end}</span></p>
-              <p><span className="text-slate-400">Rent</span> <span className="font-medium text-slate-900">${lease.rent}</span></p>
-              <p><span className="text-slate-400">Deposit</span> <span className="font-medium text-slate-900">${lease.securityDeposit || 0}</span></p>
+              <p><span className="text-slate-400">Rent</span> <span className="font-medium text-slate-900">PHP {Number(lease.rent).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span></p>
+              <p><span className="text-slate-400">Deposit</span> <span className="font-medium text-slate-900">PHP {Number(lease.securityDeposit || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span></p>
+              <p><span className="text-slate-400">Compliance</span> <span className="font-medium text-slate-900">{humanizeStatus(lease.compliance_status || 'requires_manual_verification')}</span></p>
             </div>
             <div className="mt-5 flex justify-end gap-2">
+              <button className="secondary-btn" onClick={async () => {
+                const popup = window.open('', '_blank');
+                if (!popup) {
+                  window.alert('Allow pop-ups to print the lease agreement.');
+                  return;
+                }
+                popup.opener = null;
+                try {
+                  const response = await api.get(`/leases/${lease.id}/agreement`);
+                  printLeaseAgreement(response.data.lease, popup);
+                } catch (error) {
+                  popup.close();
+                  window.alert(error.message);
+                }
+              }}>Print agreement</button>
+              <button className="secondary-btn" onClick={() => setSelectedLease(lease)}>Lease records</button>
               {lease.status === 'Pending' && <button className="primary-btn" onClick={async () => {
                 try {
                   await api.put(`/leases/${lease.id}`, { lease_status: 'active' });
@@ -1270,8 +1526,164 @@ function LeasesPage() {
           </div>
         ))}
       </div>
-      <FormDialog open={dialogOpen} title="Create lease" fields={fields} initialValues={{ applicationId: eligibleApplications[0]?.id || '', coTenantIds: [], unitId: '', start: '', end: '', rent: '', securityDeposit: 0, advancePayment: 0, paymentDueDay: 1 }} onClose={() => setDialogOpen(false)} onSubmit={createLease} />
+      <FormDialog open={dialogOpen} title="Create lease" submitLabel="Create lease" sections={sections} initialValues={{ applicationId: eligibleApplications[0]?.id || '', coTenantIds: [], unitId: '', start: '', end: '', rent: '', securityDeposit: 0, advancePayment: 0, paymentDueDay: 5 }} onClose={() => setDialogOpen(false)} onSubmit={createLease} />
+      <LeaseRecordsDialog lease={selectedLease} onClose={() => setSelectedLease(null)} />
     </div>
+  );
+}
+
+function LeaseRecordsDialog({ lease, onClose }) {
+  const [tab, setTab] = useState('deposit');
+  const [deposit, setDeposit] = useState(null);
+  const [increaseHistory, setIncreaseHistory] = useState([]);
+  const [notices, setNotices] = useState([]);
+  const [loadError, setLoadError] = useState('');
+  const [depositFormOpen, setDepositFormOpen] = useState(false);
+  const [deductionFormOpen, setDeductionFormOpen] = useState(false);
+  const [increaseFormOpen, setIncreaseFormOpen] = useState(false);
+  const [noticeFormOpen, setNoticeFormOpen] = useState(false);
+
+  const reload = async () => {
+    if (!lease) return;
+    setLoadError('');
+    try {
+      const [depositResponse, increaseResponse, noticeResponse] = await Promise.all([
+        api.get(`/leases/${lease.id}/deposit`),
+        api.get(`/leases/${lease.id}/rent-increases`),
+        api.get(`/leases/${lease.id}/notices`),
+      ]);
+      setDeposit(depositResponse.data.deposit);
+      setIncreaseHistory(increaseResponse.data);
+      setNotices(noticeResponse.data);
+    } catch (error) {
+      setLoadError(error.message || 'Unable to load lease records.');
+    }
+  };
+
+  useEffect(() => {
+    setTab('deposit');
+    reload();
+  }, [lease?.id]);
+
+  if (!lease) return null;
+
+  const depositFields = [
+    { name: 'received_date', label: 'Date received', type: 'date' },
+    { name: 'bank_deposit_date', label: 'Bank deposit date', type: 'date' },
+    { name: 'bank_account_reference', label: 'Bank account reference' },
+    { name: 'accrued_interest', label: 'Accrued interest (PHP)', type: 'number', min: 0 },
+    { name: 'refund_amount', label: 'Refund amount (PHP)', type: 'number', min: 0 },
+    { name: 'refund_date', label: 'Refund date', type: 'date' },
+    { name: 'settlement_status', label: 'Settlement status', type: 'select', options: ['pending', 'held', 'partially_refunded', 'refunded', 'settled'], required: true },
+  ];
+  const deductionFields = [
+    { name: 'amount', label: 'Deduction amount (PHP)', type: 'number', min: 0.01, required: true },
+    { name: 'basis', label: 'Deduction basis', type: 'select', options: [{ value: 'unpaid_obligation', label: 'Unpaid obligation' }, { value: 'damage', label: 'Damage to the premises' }], required: true },
+    { name: 'reason', label: 'Reason (unpaid obligation or damage)', type: 'textarea', required: true },
+    { name: 'supporting_document_ref', label: 'Supporting document reference', required: true },
+  ];
+  const increaseFields = [
+    { name: 'proposed_monthly_rent', label: 'Proposed monthly rent (PHP)', type: 'number', min: 1, required: true },
+    { name: 'effective_date', label: 'Effective date', type: 'date', required: true },
+    { name: 'reason', label: 'Reason for increase', type: 'textarea', required: true },
+  ];
+  const noticeFields = [
+    { name: 'notice_type', label: 'Notice type', type: 'select', options: ['tenant_notice', 'payment_demand', 'lease_expiration', 'lease_termination', 'sublease_consent', 'other'], required: true },
+    { name: 'notice_date', label: 'Notice date', type: 'date', required: true },
+    { name: 'recipient', label: 'Recipient', required: true },
+    { name: 'description', label: 'Description', type: 'textarea', required: true },
+    { name: 'legal_ground', label: 'Termination / legal ground', type: 'select', options: ['', 'unauthorized_sublease', 'rent_arrears', 'owner_or_family_use', 'necessary_repairs', 'lease_expiration', 'other'] },
+    { name: 'written_sublease_consent', label: 'Written sublease consent recorded?', type: 'select', options: [{ value: 'false', label: 'No' }, { value: 'true', label: 'Yes' }] },
+    { name: 'supporting_document_ref', label: 'Supporting document reference' },
+  ];
+
+  return (
+    <>
+      <DetailsDialog title={`Lease records · ${lease.id}`} onClose={onClose}>
+        <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-4">
+          {[['deposit', 'Security deposit'], ['increases', 'Rent increases'], ['notices', 'Notices']].map(([value, label]) => (
+            <button key={value} className={tab === value ? 'status-badge border-emerald-200 bg-emerald-50 text-emerald-700' : 'status-badge border-slate-200 bg-white text-slate-600'} onClick={() => setTab(value)}>{label}</button>
+          ))}
+        </div>
+        {loadError && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{loadError}</p>}
+        {tab === 'deposit' && (
+          <div className="mt-4 space-y-4">
+            {deposit ? (
+              <>
+                <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                  <div><dt className="text-slate-500">Original deposit</dt><dd className="font-semibold text-slate-900">PHP {Number(deposit.original_amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</dd></div>
+                  <div><dt className="text-slate-500">Received</dt><dd className="font-medium text-slate-900">{deposit.received_date || 'Not recorded'}</dd></div>
+                  <div><dt className="text-slate-500">Bank deposit</dt><dd className="font-medium text-slate-900">{deposit.bank_deposit_date || 'Not recorded'}</dd></div>
+                  <div><dt className="text-slate-500">Bank reference</dt><dd className="font-medium text-slate-900">{deposit.bank_account_reference || 'Not recorded'}</dd></div>
+                  <div><dt className="text-slate-500">Accrued interest</dt><dd className="font-medium text-slate-900">PHP {Number(deposit.accrued_interest).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</dd></div>
+                  <div><dt className="text-slate-500">Refund amount / status</dt><dd className="font-medium text-slate-900">PHP {Number(deposit.refund_amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · {humanizeStatus(deposit.settlement_status)}</dd></div>
+                </dl>
+                {deposit.deductions?.length > 0 && <div><h4 className="font-medium text-slate-900">Authorized deductions</h4>{deposit.deductions.map((item) => <p key={item.deduction_id} className="mt-2 text-sm text-slate-600">PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · {item.reason} · Evidence: {item.supporting_document_ref}</p>)}</div>}
+                <div className="flex gap-2">
+                  <button className="secondary-btn" onClick={() => setDepositFormOpen(true)}>Update deposit record</button>
+                  <button className="secondary-btn" onClick={() => setDeductionFormOpen(true)}>Record deduction</button>
+                </div>
+                <p className="text-xs text-slate-500">A deposit is not automatically forfeited. Deductions require a recorded reason and evidence reference.</p>
+              </>
+            ) : <p className="text-sm text-slate-500">No deposit record is available for this lease.</p>}
+          </div>
+        )}
+        {tab === 'increases' && (
+          <div className="mt-4 space-y-4">
+            <button className="primary-btn" onClick={() => setIncreaseFormOpen(true)}>Propose rent increase</button>
+            {increaseHistory.length ? increaseHistory.map((item) => <div key={item.rent_increase_id} className="rounded-xl border border-slate-200 p-3 text-sm">
+              <p className="font-medium text-slate-900">PHP {Number(item.previous_monthly_rent).toLocaleString('en-PH')} → PHP {Number(item.proposed_monthly_rent).toLocaleString('en-PH')} ({Number(item.increase_percent).toFixed(2)}%)</p>
+              <p className="mt-1 text-slate-600">Effective {item.effective_date} · {humanizeStatus(item.assessment_status)}{item.regulation_title ? ` · ${item.regulation_title}` : ''}</p>
+              <p className="mt-1 text-slate-500">{item.reason}</p>
+            </div>) : <p className="text-sm text-slate-500">No rent changes recorded.</p>}
+          </div>
+        )}
+        {tab === 'notices' && (
+          <div className="mt-4 space-y-4">
+            <button className="primary-btn" onClick={() => setNoticeFormOpen(true)}>Record notice or consent</button>
+            {notices.length ? notices.map((item) => <div key={item.notice_id} className="rounded-xl border border-slate-200 p-3 text-sm">
+              <p className="font-medium text-slate-900">{humanizeStatus(item.notice_type)} · {item.notice_date} · {item.recipient}</p>
+              <p className="mt-1 text-slate-600">{item.description}</p>
+              {item.legal_ground && <p className="mt-1 text-slate-500">Ground: {humanizeStatus(item.legal_ground)}</p>}
+              {item.supporting_document_ref && <p className="mt-1 text-slate-500">Document reference: {item.supporting_document_ref}</p>}
+            </div>) : <p className="text-sm text-slate-500">No notices recorded.</p>}
+            <p className="text-xs text-slate-500">These records do not terminate a lease or initiate eviction. Seek legal review for termination-related action.</p>
+          </div>
+        )}
+      </DetailsDialog>
+      <FormDialog open={depositFormOpen} title="Update security deposit" fields={depositFields} initialValues={{
+        received_date: deposit?.received_date || '',
+        bank_deposit_date: deposit?.bank_deposit_date || '',
+        bank_account_reference: deposit?.bank_account_reference || '',
+        accrued_interest: deposit?.accrued_interest || 0,
+        refund_amount: deposit?.refund_amount || 0,
+        refund_date: deposit?.refund_date || '',
+        settlement_status: deposit?.settlement_status || 'pending',
+      }} onClose={() => setDepositFormOpen(false)} onSubmit={async (values) => {
+        const response = await api.patch(`/leases/${lease.id}/deposit`, values);
+        setDeposit(response.data.deposit);
+        setDepositFormOpen(false);
+      }} />
+      <FormDialog open={deductionFormOpen} title="Record deposit deduction" fields={deductionFields} initialValues={{ amount: '', basis: 'unpaid_obligation', reason: '', supporting_document_ref: '' }} onClose={() => setDeductionFormOpen(false)} onSubmit={async (values) => {
+        const response = await api.post(`/leases/${lease.id}/deposit/deductions`, values);
+        setDeposit(response.data.deposit);
+        setDeductionFormOpen(false);
+      }} />
+      <FormDialog open={increaseFormOpen} title="Propose rent increase" fields={increaseFields} initialValues={{ proposed_monthly_rent: lease.rent, effective_date: '', reason: '' }} onClose={() => setIncreaseFormOpen(false)} onSubmit={async (values) => {
+        const response = await api.post(`/leases/${lease.id}/rent-increases`, values);
+        if (response.data?.message) {
+          await reload();
+          throw new Error(response.data.message);
+        }
+        await reload();
+        setIncreaseFormOpen(false);
+      }} />
+      <FormDialog open={noticeFormOpen} title="Record notice or consent" fields={noticeFields} initialValues={{ notice_type: 'tenant_notice', notice_date: new Date().toISOString().slice(0, 10), recipient: lease.tenant, description: '', legal_ground: '', written_sublease_consent: 'false', supporting_document_ref: '' }} onClose={() => setNoticeFormOpen(false)} onSubmit={async (values) => {
+        await api.post(`/leases/${lease.id}/notices`, values);
+        await reload();
+        setNoticeFormOpen(false);
+      }} />
+    </>
   );
 }
 
@@ -1281,12 +1693,19 @@ function InvoicesPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [query, setQuery] = useState(searchParams.get('q') || '');
   const [statusFilter, setStatusFilter] = useState('all');
+  const activeLeases = data.leases.filter((item) => item.status === 'Active');
   const fields = [
-    { name: 'leaseId', label: 'Lease', type: 'select', options: data.leases.filter((item) => item.status === 'Active').map((item) => ({ value: item.id, label: `${item.id} — ${item.tenant}` })), required: true },
-    { name: 'periodStart', label: 'Billing period start', type: 'date', required: true },
+    { name: 'leaseId', label: 'Lease', type: 'select', options: activeLeases.map((item) => ({ value: item.id, label: `${item.id} — ${item.tenant}` })), onChangeValues: (nextValues, leaseId) => {
+      const lease = activeLeases.find((item) => String(item.id) === String(leaseId));
+      return { ...nextValues, dueDate: monthlyDueDate(nextValues.periodStart, lease?.paymentDueDay) };
+    }, required: true },
+    { name: 'periodStart', label: 'Billing period start', type: 'date', onChangeValues: (nextValues) => {
+      const lease = activeLeases.find((item) => String(item.id) === String(nextValues.leaseId));
+      return { ...nextValues, dueDate: monthlyDueDate(nextValues.periodStart, lease?.paymentDueDay) };
+    }, required: true },
     { name: 'periodEnd', label: 'Billing period end', type: 'date', required: true },
     { name: 'issueDate', label: 'Issue date', type: 'date', required: true },
-    { name: 'dueDate', label: 'Due date', type: 'date', required: true },
+    { name: 'dueDate', label: 'Due date (defaults to the lease payment day)', type: 'date', required: true },
     { name: 'amount', label: 'Total amount', type: 'number', min: 0, required: true },
   ];
   const visibleInvoices = data.invoices.filter((invoice) =>
@@ -1296,7 +1715,8 @@ function InvoicesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Invoices & payments" subtitle="Review invoice status, outstanding balances, and successful payment verification." action={<button className="primary-btn" onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> Generate invoice</button>} />
+      <PageHeader title="Invoices & payments" subtitle="Review invoice status, outstanding balances, and successful payment verification." action={<button className="primary-btn" disabled={!activeLeases.length} title={!activeLeases.length ? 'An active lease is required to generate an invoice.' : undefined} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> Generate invoice</button>} />
+      {!activeLeases.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">An active lease is required before generating a rent invoice.</div>}
       <div className="grid gap-3 sm:grid-cols-[1fr_14rem]">
         <SearchFilterBar query={query} onQueryChange={setQuery} placeholder="Search invoices and tenants" />
         <select className="field" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All invoice statuses</option>{['unpaid', 'partially_paid', 'paid', 'overdue', 'void'].map((status) => <option key={status} value={status}>{status.replace('_', ' ')}</option>)}</select>
@@ -1321,7 +1741,7 @@ function InvoicesPage() {
                   <td className="px-4 py-3 text-slate-600">{invoice.tenant}</td>
                   <td className="px-4 py-3 text-slate-600">{invoice.period}</td>
                   <td className="px-4 py-3 text-slate-600">{invoice.dueDate}</td>
-                  <td className="px-4 py-3 font-medium text-slate-900">${invoice.amount}</td>
+                  <td className="px-4 py-3 font-medium text-slate-900">PHP {Number(invoice.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <StatusBadge label={invoice.status === 'partially_paid' ? 'Partial' : invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)} />
@@ -1344,22 +1764,58 @@ function InvoicesPage() {
       </div>
       <div className="panel p-5">
         <h3 className="text-lg font-semibold text-slate-900">Payment attempts and verified receipts</h3>
-        <p className="mt-1 text-sm text-slate-600">An attempt is not a payment. Receipts appear only after server-side gateway verification.</p>
+        <p className="mt-1 text-sm text-slate-600">An attempt is not a payment. Cash and bank-transfer attempts require landlord confirmation; card and e-wallet verification require a configured gateway.</p>
         {data.paymentAttempts.length ? (
           <div className="mt-4 divide-y divide-slate-200">
             {data.paymentAttempts.map((attempt) => (
               <div key={attempt.id} className="flex flex-col justify-between gap-2 py-3 sm:flex-row sm:items-center">
                 <div><p className="font-medium text-slate-900">{attempt.id} · Invoice {attempt.invoiceId}</p><p className="text-sm text-slate-500">{attempt.paymentMethod?.replace('_', ' ') || 'Payment method'} · {new Date(attempt.initiatedAt).toLocaleString()}</p></div>
-                <div className="flex items-center gap-3"><span className="font-semibold text-slate-900">${Number(attempt.amount).toLocaleString()}</span><StatusBadge label={humanizeStatus(attempt.status)} /></div>
+                <div className="flex items-center gap-3"><span className="font-semibold text-slate-900">PHP {Number(attempt.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span><StatusBadge label={humanizeStatus(attempt.status)} />
+                  {attempt.status === 'pending' && ['cash', 'bank_transfer', 'other'].includes(attempt.paymentMethod) && <button className="secondary-btn" onClick={async () => {
+                    if (!window.confirm(`Confirm receipt of PHP ${Number(attempt.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} for invoice ${attempt.invoiceId}?`)) return;
+                    try {
+                      await api.post(`/payments/${attempt.id}/confirm`, {});
+                      refresh();
+                    } catch (error) {
+                      window.alert(error.message);
+                    }
+                  }}>Confirm received</button>}
+                  {attempt.payment_status && ['completed', 'refunded'].includes(attempt.payment_status) && Number(attempt.amount) > Number(attempt.refunded_amount || 0) && <button className="secondary-btn" onClick={async () => {
+                    const reason = window.prompt('Reason for the refund:');
+                    if (!reason?.trim()) return;
+                    const amount = Number(attempt.amount) - Number(attempt.refunded_amount || 0);
+                    if (!window.confirm(`Record a refund of PHP ${amount.toLocaleString('en-PH', { minimumFractionDigits: 2 })}?`)) return;
+                    try {
+                      await api.post(`/payments/${attempt.id}/refund`, { amount, reason });
+                      refresh();
+                    } catch (error) {
+                      window.alert(error.message);
+                    }
+                  }}>Record refund</button>}
+                  {attempt.receipt_number && <button className="secondary-btn" onClick={async () => {
+                    const popup = window.open('', '_blank');
+                    if (!popup) {
+                      window.alert('Allow pop-ups to print the receipt.');
+                      return;
+                    }
+                    try {
+                      const response = await api.get(`/payments/${attempt.id}/receipt`);
+                      printPaymentReceipt(response.data.receipt, popup);
+                    } catch (error) {
+                      popup.close();
+                      window.alert(error.message);
+                    }
+                  }}>Print receipt</button>}
+                </div>
               </div>
             ))}
           </div>
         ) : <p className="mt-4 text-sm text-slate-500">No payment attempts recorded.</p>}
         <div className="mt-4 border-t border-slate-200 pt-4">
-          <h4 className="font-medium text-slate-900">Verified receipts</h4>
-          {data.paymentHistory.filter((item) => item.status === 'completed' && item.receiptNumber).length
-            ? data.paymentHistory.filter((item) => item.status === 'completed' && item.receiptNumber).map((item) => <p key={item.id} className="mt-2 text-sm text-slate-600">{item.receiptNumber} · {item.amount}</p>)
-            : <p className="mt-1 text-sm text-slate-500">No server-verified receipts are available.</p>}
+          <h4 className="font-medium text-slate-900">Receipts</h4>
+          {data.paymentHistory.filter((item) => item.receiptNumber).length
+            ? data.paymentHistory.filter((item) => item.receiptNumber).map((item) => <p key={item.id} className="mt-2 text-sm text-slate-600">{item.receiptNumber} · PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · Invoice {item.invoice_number} · Lease {item.lease_id} · {humanizeStatus(item.status)}</p>)
+            : <p className="mt-1 text-sm text-slate-500">No confirmed payments have generated receipts.</p>}
         </div>
       </div>
       <FormDialog open={dialogOpen} title="Generate rent invoice" fields={fields} initialValues={{ leaseId: data.leases.find((item) => item.status === 'Active')?.id || '', periodStart: '', periodEnd: '', issueDate: new Date().toISOString().slice(0, 10), dueDate: '', amount: '' }} onClose={() => setDialogOpen(false)} onSubmit={async (values) => {
@@ -1413,7 +1869,8 @@ function ExpensesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Expenses" subtitle="Track operating costs, categories, and property-level spending summaries." action={<button className="primary-btn" onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> Record expense</button>} />
+      <PageHeader title="Expenses" subtitle="Track operating costs, categories, and property-level spending summaries." action={<button className="primary-btn" disabled={!data.properties.length} title={!data.properties.length ? 'Add a property before recording an expense.' : undefined} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> Record expense</button>} />
+      {!data.properties.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Create a property before recording a property expense.</div>}
       <div className="grid gap-4 md:grid-cols-3">
         <SummaryCard label="Filtered total" value={`$${total.toLocaleString()}`} delta={`${visibleExpenses.length} expense records`} tone="emerald" />
         <SummaryCard label="Categories" value={new Set(visibleExpenses.map((item) => item.category)).size} delta="In current filter" tone="sky" />
@@ -1814,7 +2271,7 @@ function TenantApplicationsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Rental application" subtitle="Submit a rental application to a landlord and track its status." action={<button className="primary-btn" disabled={!data.landlords.length} onClick={() => { setMessage(''); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> New application</button>} />
+      <PageHeader title="Rental application" subtitle="Submit a rental application to a landlord and track its status." action={<button className="primary-btn" disabled={!data.landlords.length} title={!data.landlords.length ? 'A landlord account must be available before applying.' : undefined} onClick={() => { setMessage(''); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> New application</button>} />
       {!data.landlords.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No landlords are available to apply to yet.</div>}
       {message && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
       <div className="panel overflow-hidden">
@@ -1941,13 +2398,20 @@ function TenantPaymentsPage() {
   const [selectedMethod, setSelectedMethod] = useState('bank_transfer');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const unpaidInvoice = data.tenantInvoices.find((invoice) => ['unpaid', 'partially_paid', 'overdue', 'Unpaid', 'Partial', 'Overdue'].includes(invoice.status));
+  const invoiceBalance = (invoice) => {
+    const paid = data.paymentHistory
+      .filter((payment) => String(payment.invoice_id) === String(invoice.id) && ['completed', 'refunded'].includes(payment.status))
+      .reduce((total, payment) => total + Number(payment.amount) - Number(payment.refunded_amount || 0), 0);
+    return Math.max(0, Number(invoice.amount) - paid);
+  };
+  const unpaidInvoice = data.tenantInvoices.find((invoice) => invoiceBalance(invoice) > 0);
+  const pendingAttempt = unpaidInvoice && data.paymentAttempts.some((attempt) => String(attempt.invoiceId) === String(unpaidInvoice.id) && attempt.status === 'pending');
   const paymentMethodsInUi = [
     { id: 'bank_transfer', label: 'Bank transfer', type: 'Not configured' },
     { id: 'card', label: 'Card', type: 'Not configured' },
   ];
   const startPayment = async () => {
-    if (!unpaidInvoice || !selectedMethod) return;
+    if (!unpaidInvoice || pendingAttempt || !selectedMethod) return;
     setBusy(true);
     setMessage('');
     try {
@@ -1956,7 +2420,7 @@ function TenantPaymentsPage() {
         payment_method: selectedMethod,
         gateway_name: 'manual',
         gateway_reference: makeId('PAY'),
-        amount: Number(unpaidInvoice.amount),
+        amount: invoiceBalance(unpaidInvoice),
       });
       refresh();
       setMessage('Payment attempt recorded as pending. No money was charged; configure a payment gateway to process real payments.');
@@ -1969,11 +2433,12 @@ function TenantPaymentsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Payments" subtitle="Choose a saved method and initiate a payment attempt. Only the server can verify success." action={<button className="primary-btn" disabled={!unpaidInvoice || busy} onClick={startPayment}>{busy ? 'Starting…' : `Pay $${unpaidInvoice?.amount || 0}`}</button>} />
+      <PageHeader title="Payments" subtitle="Record a payment attempt against an unpaid invoice. A configured payment gateway is required to charge or verify real payments." action={<button className="primary-btn" disabled={!unpaidInvoice || pendingAttempt || busy} title={!unpaidInvoice ? 'There are no unpaid invoices to pay.' : pendingAttempt ? 'A payment attempt is already pending for this invoice.' : undefined} onClick={startPayment}>{busy ? 'Starting…' : pendingAttempt ? 'Payment pending' : unpaidInvoice ? `Record attempt — PHP ${invoiceBalance(unpaidInvoice).toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : 'No balance due'}</button>} />
       {message && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{message}</div>}
       <div className="grid gap-6 xl:grid-cols-[1fr_1.2fr]">
         <div className="panel p-5">
-          <h3 className="text-lg font-semibold text-slate-900">Available payment methods</h3>
+          <h3 className="text-lg font-semibold text-slate-900">Payment method for the attempt</h3>
+          <p className="mt-1 text-sm text-slate-600">These choices record the selected method only; neither option is connected to a payment processor.</p>
           <div className="mt-4 space-y-3">
             {paymentMethodsInUi.map((method) => (
               <button key={method.id} type="button" onClick={() => setSelectedMethod(method.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${selectedMethod === method.id ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
@@ -1990,18 +2455,43 @@ function TenantPaymentsPage() {
         <div className="panel p-5">
           <h3 className="text-lg font-semibold text-slate-900">Payment history</h3>
           <div className="mt-4 space-y-3">
-            {[...data.paymentAttempts, ...data.paymentHistory].map((item) => (
+            {data.paymentAttempts.map((item) => (
               <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3">
                 <div>
-                  <p className="font-medium text-slate-900">{item.id}</p>
+                  <p className="font-medium text-slate-900">Attempt {item.id} · Invoice {item.invoice_number || item.invoiceId}</p>
                   <p className="text-xs text-slate-500">{item.method || item.paymentMethod?.replace('_', ' ')}</p>
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold text-slate-900">{typeof item.amount === 'number' ? `$${item.amount.toLocaleString()}` : item.amount}</p>
+                  <p className="font-semibold text-slate-900">PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
                   <StatusBadge label={item.status === 'pending' ? 'Pending' : item.status} />
+                  {item.payment_status && <p className="mt-1 text-xs text-slate-500">Payment: {humanizeStatus(item.payment_status)}</p>}
+                  {item.status === 'pending' && <button className="mt-2 text-xs font-medium text-rose-700" onClick={async () => {
+                    if (!window.confirm(`Cancel pending payment attempt ${item.id}?`)) return;
+                    try {
+                      await api.post(`/payments/${item.id}/cancel`, {});
+                      refresh();
+                    } catch (error) {
+                      window.alert(error.message);
+                    }
+                  }}>Cancel attempt</button>}
+                  {item.receipt_number && <button className="mt-2 text-xs font-medium text-emerald-700" onClick={async () => {
+                    const popup = window.open('', '_blank');
+                    if (!popup) {
+                      window.alert('Allow pop-ups to print the receipt.');
+                      return;
+                    }
+                    try {
+                      const response = await api.get(`/payments/${item.id}/receipt`);
+                      printPaymentReceipt(response.data.receipt, popup);
+                    } catch (error) {
+                      popup.close();
+                      window.alert(error.message);
+                    }
+                  }}>Print receipt · {item.receipt_number}</button>}
                 </div>
               </div>
             ))}
+            {!data.paymentAttempts.length && <p className="text-sm text-slate-500">No payment attempts recorded.</p>}
           </div>
         </div>
       </div>
@@ -2021,7 +2511,7 @@ function TenantMaintenancePage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Maintenance requests" subtitle="Submit and track maintenance issues for your current lease." action={<button className="primary-btn" disabled={!currentLease} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> New request</button>} />
+      <PageHeader title="Maintenance requests" subtitle="Submit and track maintenance issues for your current lease." action={<button className="primary-btn" disabled={!currentLease} title={!currentLease ? 'An active lease is required to submit a maintenance request.' : undefined} onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> New request</button>} />
       {!currentLease && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">A maintenance request requires an active lease associated with this tenant.</div>}
       <div className="panel overflow-hidden">
         <div className="overflow-x-auto">
@@ -2181,7 +2671,7 @@ function PreviewNotice({ loading, error }) {
         ? <><strong>Backend data unavailable:</strong> {error}</>
         : loading
           ? 'Loading live account records from the backend…'
-          : <><strong>Live data:</strong> records are loaded from the backend. Most page changes are still browser-only and are not saved to the database. Payment processing also requires a configured gateway.</>}</p>
+          : <><strong>Live data:</strong> records and supported changes are saved through the backend. Payment attempts are recorded as pending; real charges require a configured payment gateway.</>}</p>
     </div>
   );
 }
@@ -2205,7 +2695,7 @@ function EmptyState({ title, description }) {
   );
 }
 
-function FormDialog({ open, title, fields, initialValues, onClose, onSubmit }) {
+function FormDialog({ open, title, submitLabel = 'Save', fields, sections, initialValues, onClose, onSubmit }) {
   const [values, setValues] = useState(initialValues);
   const [error, setError] = useState('');
 
@@ -2237,49 +2727,68 @@ function FormDialog({ open, title, fields, initialValues, onClose, onSubmit }) {
           <h2 id="form-dialog-title" className="text-lg font-semibold text-slate-900">{title}</h2>
           <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button>
         </div>
-        <form className="space-y-4 p-5" onSubmit={submit}>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {fields.map((field) => (
-              <div key={field.name} className={field.type === 'textarea' || field.type === 'file' ? 'sm:col-span-2' : ''}>
-                <label htmlFor={`field-${field.name}`} className="label">{field.label}</label>
-                {field.type === 'textarea' ? (
-                  <textarea id={`field-${field.name}`} required={field.required} value={values[field.name] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} className="field min-h-24" />
-                ) : field.type === 'multiselect' ? (
-                  <select id={`field-${field.name}`} multiple value={values[field.name] ?? []} onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.selectedOptions).map((option) => option.value) }))} className="field min-h-28">
-                    {field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                ) : field.type === 'select' ? (
-                  <select id={`field-${field.name}`} required={field.required} value={values[field.name] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} className="field">
-                    <option value="">Select an option</option>
-                    {field.options?.map((option) => {
-                      const value = typeof option === 'string' ? option : option.value;
-                      const label = typeof option === 'string' ? option.replaceAll('_', ' ') : option.label;
-                      return <option key={value} value={value}>{label}</option>;
-                    })}
-                  </select>
-                ) : field.type === 'file' ? (
-                  <input id={`field-${field.name}`} type="file" accept={field.accept} multiple={field.multiple} className="field file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:py-1.5 file:font-semibold file:text-emerald-700" onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.files || []) }))} />
-                ) : (
-                  <input
-                    id={`field-${field.name}`}
-                    type={field.type || 'text'}
-                    required={field.required}
-                    min={field.min}
-                    max={field.max}
-                    minLength={field.minLength}
-                    step={field.type === 'number' && field.min === 0.01 ? '0.01' : undefined}
-                    value={values[field.name] ?? ''}
-                    onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))}
-                    className="field"
-                  />
-                )}
+        <form className="space-y-5 p-5" onSubmit={submit}>
+          {(sections || [{ title: null, fields }]).map((section, sectionIndex) => (
+            <div key={section.title || sectionIndex} className={section.title ? 'rounded-xl border border-slate-200 p-4' : ''}>
+              {section.title && (
+                <div className="mb-4 border-b border-slate-100 pb-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700">Section {sectionIndex + 1}</p>
+                  <h3 className="mt-1 font-semibold text-slate-900">{section.title}</h3>
+                  {section.description && <p className="mt-1 text-sm text-slate-500">{section.description}</p>}
+                </div>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {section.fields.map((field) => {
+                  const options = typeof field.options === 'function' ? field.options(values) : field.options;
+                  const minValue = typeof field.min === 'function' ? field.min(values) : field.min;
+                  return (
+                  <div key={field.name} className={field.type === 'textarea' || field.type === 'file' ? 'sm:col-span-2' : ''}>
+                    <label htmlFor={`field-${field.name}`} className="label">{field.label}</label>
+                    {field.type === 'textarea' ? (
+                      <textarea id={`field-${field.name}`} required={field.required} value={values[field.name] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} className="field min-h-24" />
+                    ) : field.type === 'multiselect' ? (
+                      <select id={`field-${field.name}`} multiple value={values[field.name] ?? []} onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.selectedOptions).map((option) => option.value) }))} className="field min-h-28">
+                        {options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    ) : field.type === 'select' ? (
+                      <select id={`field-${field.name}`} required={field.required} value={values[field.name] ?? ''} onChange={(event) => setValues((current) => {
+                        const nextValues = { ...current, [field.name]: event.target.value };
+                        return field.onChangeValues ? field.onChangeValues(nextValues, event.target.value) : nextValues;
+                      })} className="field">
+                        <option value="">Select an option</option>
+                        {options?.map((option) => {
+                          const value = typeof option === 'string' ? option : option.value;
+                          const label = typeof option === 'string' ? option.replaceAll('_', ' ') : option.label;
+                          return <option key={value} value={value}>{label}</option>;
+                        })}
+                      </select>
+                    ) : field.type === 'file' ? (
+                      <input id={`field-${field.name}`} type="file" accept={field.accept} multiple={field.multiple} className="field file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:py-1.5 file:font-semibold file:text-emerald-700" onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.files || []) }))} />
+                    ) : (
+                      <input
+                        id={`field-${field.name}`}
+                        type={field.type || 'text'}
+                        required={field.required}
+                        min={minValue}
+                        max={field.max}
+                        minLength={field.minLength}
+                        step={field.type === 'number' && field.min === 0.01 ? '0.01' : undefined}
+                        value={values[field.name] ?? ''}
+                        onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))}
+                        className="field"
+                      />
+                    )}
+                  </div>
+                  );
+                })}
+                {section.renderSummary?.(values)}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
           {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
           <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
             <button type="button" className="secondary-btn" onClick={onClose}>Cancel</button>
-            <button type="submit" className="primary-btn">Save</button>
+            <button type="submit" className="primary-btn">{submitLabel}</button>
           </div>
         </form>
       </section>
@@ -2314,8 +2823,10 @@ function downloadCsv(filename, rows) {
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function PageHeader({ title, subtitle, action }) {

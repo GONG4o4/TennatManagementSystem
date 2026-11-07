@@ -6,6 +6,7 @@ const WorkspaceContext = createContext(null);
 
 const emptyWorkspace = () => ({
   properties: [],
+  rentalRegulations: [],
   landlords: [],
   units: [],
   applications: [],
@@ -36,6 +37,8 @@ function mapWorkspace(role, payload) {
     id: item.property_id,
     name: item.property_name,
     type: item.property_type,
+    rentalClassification: item.rental_classification || 'unknown',
+    constructionDate: dateOnly(item.construction_date),
     status: item.property_status,
   }));
   const units = (payload.units || []).map((item) => ({
@@ -166,6 +169,7 @@ function mapWorkspace(role, payload) {
   return {
     ...emptyWorkspace(),
     properties,
+    rentalRegulations: payload.rentalRegulations || [],
     landlords: (payload.landlords || []).map((item) => ({
       ...item,
       id: item.landlord_id,
@@ -205,7 +209,7 @@ function mapWorkspace(role, payload) {
       phone: profile.phone || '',
       businessName: profile.business_name || '',
     },
-    applicationsForTenant: role === 'tenant' ? applications.map((item) => ({
+    applicationsForTenant: ['applicant', 'tenant'].includes(role) ? applications.map((item) => ({
       ...item,
       status: String(item.application_status || '').toLowerCase(),
     })) : [],
@@ -222,7 +226,7 @@ function mapWorkspace(role, payload) {
 }
 
 export function WorkspaceProvider({ children }) {
-  const { user } = useAuth();
+  const { user, syncUser } = useAuth();
   const [data, setData] = useState(emptyWorkspace);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -246,8 +250,19 @@ export function WorkspaceProvider({ children }) {
       setError('');
       try {
         const role = user.role;
-        const requests = {
-          profile: api.get('/profile'),
+        const profileResponse = await api.get('/profile');
+        const profile = profileResponse.data?.user || {};
+        if (profile.role && profile.role !== role) {
+          syncUser({ ...user, ...profile });
+          return;
+        }
+        const requests = role === 'applicant' ? {
+          profile: Promise.resolve(profileResponse),
+          applications: api.get('/applications'),
+          landlords: api.get('/landlords'),
+          units: api.get('/units'),
+        } : {
+          profile: Promise.resolve(profileResponse),
           applications: api.get('/applications'),
           leases: api.get('/leases'),
           invoices: api.get('/invoices'),
@@ -258,13 +273,14 @@ export function WorkspaceProvider({ children }) {
         if (role === 'landlord') {
           Object.assign(requests, {
             properties: api.get('/properties'),
+            rentalRegulations: api.get('/rental-regulations'),
             units: api.get('/units'),
             criteria: api.get('/screening-criteria'),
             screenings: api.get('/screenings'),
             expenses: api.get('/expenses'),
             audit: api.get('/audit-log'),
           });
-        } else {
+        } else if (role === 'tenant') {
           requests.landlords = api.get('/landlords');
           requests.units = api.get('/units');
         }
@@ -286,7 +302,7 @@ export function WorkspaceProvider({ children }) {
 
     loadWorkspace();
     return () => { active = false; };
-  }, [user, reloadVersion]);
+  }, [user, reloadVersion, syncUser]);
 
   const updateList = (key, updater) => {
     setData((current) => {
