@@ -10,8 +10,16 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
         return ['status' => 200, 'body' => ['status' => 'ok', 'message' => 'API is running']];
     }
 
+    if ($method === 'GET' && $path === '/api/listings') {
+        return publicListingList($pdo);
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/listings/(\d+)/reviews$#', $path, $matches) === 1) {
+        return propertyReviewList($pdo, (int) $matches[1]);
+    }
+
     if ($method === 'POST' && $path === '/api/auth/register') {
-        return authRegister($pdo, requestJson());
+        return authRegister($pdo, requestFormData());
     }
 
     if ($method === 'POST' && $path === '/api/auth/login') {
@@ -20,6 +28,10 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
 
     if ($method === 'POST' && $path === '/api/auth/password') {
         return authChangePassword($pdo, authenticatedUser($pdo), requestJson());
+    }
+
+    if ($method === 'POST' && $path === '/api/payments/webhook') {
+        return paymentWebhookHitPay($pdo);
     }
 
     $user = authenticatedUser($pdo);
@@ -72,12 +84,36 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
         return applicationCreate($pdo, $user, requestJson());
     }
 
+    if ($method === 'POST' && preg_match('#^/api/listings/(\d+)/reviews$#', $path, $matches) === 1) {
+        return propertyReviewCreate($pdo, $user, (int) $matches[1], requestJson());
+    }
+
     if ($method === 'PATCH' && preg_match('#^/api/applications/(\d+)/status$#', $path, $matches) === 1) {
         return applicationStatusUpdate($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
     }
 
     if ($method === 'GET' && preg_match('#^/api/applications/(\d+)/documents$#', $path, $matches) === 1) {
         return applicationDocumentsList($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'GET' && preg_match('#^/api/tenant-documents/(\d+)/download$#', $path, $matches) === 1) {
+        return tenantDocumentDownload($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'GET' && $path === '/api/tenant-documents') {
+        return tenantDocumentsList($pdo, $user);
+    }
+
+    if ($method === 'POST' && $path === '/api/tenant-documents') {
+        return tenantDocumentUpload($pdo, $user, $_FILES, requestFormData());
+    }
+
+    if ($method === 'DELETE' && preg_match('#^/api/tenant-documents/(\d+)$#', $path, $matches) === 1) {
+        return tenantDocumentDelete($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'PATCH' && preg_match('#^/api/tenant-documents/(\d+)/verification$#', $path, $matches) === 1) {
+        return tenantDocumentVerificationUpdate($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
     }
 
     if ($method === 'POST' && preg_match('#^/api/applications/(\d+)/documents$#', $path, $matches) === 1) {
@@ -102,6 +138,14 @@ function dispatchApi(PDO $pdo, string $method, string $path): array
 
     if ($method === 'PUT' && preg_match('#^/api/screening-criteria/(\d+)$#', $path, $matches) === 1) {
         return screeningCriterionUpdate($pdo, $user, (int) $matches[1], requestJsonOrEmpty());
+    }
+
+    if ($method === 'DELETE' && preg_match('#^/api/screening-criteria/(\d+)$#', $path, $matches) === 1) {
+        return screeningCriterionDelete($pdo, $user, (int) $matches[1]);
+    }
+
+    if ($method === 'POST' && preg_match('#^/api/applications/(\d+)/screening-evaluation$#', $path, $matches) === 1) {
+        return screeningEvaluationGet($pdo, $user, (int) $matches[1]);
     }
 
     if ($method === 'POST' && preg_match('#^/api/applications/(\d+)/screenings$#', $path, $matches) === 1) {

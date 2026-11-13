@@ -82,3 +82,13 @@ function requestJsonOrEmpty(): array
 
     return $payload;
 }
+
+function requestFormData(): array
+{
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if (str_starts_with(strtolower($contentType), 'multipart/form-data')) {
+        return $_POST;
+    }
+
+    return requestJson();
+}

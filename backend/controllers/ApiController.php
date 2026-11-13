@@ -76,7 +76,7 @@ function profileUser(PDO $pdo, array $user): array
     }
 
     $statement = $pdo->prepare(
-        'SELECT t.tenant_id, t.user_id, t.first_name, t.last_name, t.email, t.phone, t.current_address, t.emergency_contact_name, t.emergency_contact_phone, u.email AS login_email, u.role
+        'SELECT t.tenant_id, t.user_id, t.first_name, t.middle_name, t.last_name, t.birthdate, t.email, t.phone, t.current_address, t.emergency_contact_name, t.emergency_contact_phone, t.employment_status, t.monthly_income, u.email AS login_email, u.role
          FROM tenant t
          JOIN users u ON u.user_id = t.user_id
          WHERE t.user_id = :user_id LIMIT 1',
@@ -88,7 +88,19 @@ function profileUser(PDO $pdo, array $user): array
     }
 
     $profile['email'] = $profile['login_email'] ?? $profile['email'];
-    $profile['name'] = trim(($profile['first_name'] ?? '') . ' ' . ($profile['last_name'] ?? ''));
+    $profile['name'] = trim(implode(' ', array_filter([
+        $profile['first_name'] ?? '',
+        $profile['middle_name'] ?? '',
+        $profile['last_name'] ?? '',
+    ])));
+
+    $docsStatement = $pdo->prepare(
+        'SELECT document_id, document_type, original_name, file_size, content_type, verification_status, uploaded_at
+         FROM tenant_document WHERE tenant_id = :tenant_id ORDER BY uploaded_at DESC',
+    );
+    $docsStatement->execute(['tenant_id' => $profile['tenant_id']]);
+    $profile['documents'] = $docsStatement->fetchAll();
+
     return $profile;
 }
 
@@ -202,7 +214,8 @@ function screeningList(PDO $pdo, array $user): array
     $landlordId = landlordIdForUser($pdo, $user);
     $statement = $pdo->prepare(
         'SELECT sr.*, s.screening_id, s.application_id, s.screening_status, s.screening_date,
-                sc.criteria_name, CONCAT(t.first_name, " ", t.last_name) AS tenant_name
+                sc.criteria_name, sc.is_active AS criteria_is_active,
+                CONCAT(t.first_name, " ", t.last_name) AS tenant_name
          FROM screening_result sr
          JOIN screening s ON s.screening_id = sr.screening_id
          JOIN tenant_application a ON a.application_id = s.application_id
@@ -213,6 +226,147 @@ function screeningList(PDO $pdo, array $user): array
     );
     $statement->execute(['landlord_id' => $landlordId]);
     return ['status' => 200, 'body' => $statement->fetchAll()];
+}
+
+function seedDefaultScreeningCriteria(PDO $pdo, int $landlordId): void
+{
+    $defaults = [
+        [
+            'Proof of income',
+            'Applicant must provide proof of a stable and sufficient source of income, such as payslips, certificate of employment, bank statements, or business income records. The landlord should assess whether the applicant can reasonably afford the monthly rent.',
+        ],
+        [
+            'Valid government-issued ID',
+            'Applicant must provide a valid government-issued identification document to verify their identity and ensure that the information provided in the rental application is accurate.',
+        ],
+        [
+            'Employment verification',
+            'Applicant should provide supporting documents confirming their current employment, business activity, or other legitimate source of income. Self-employed applicants may submit relevant business or income records.',
+        ],
+        [
+            'Previous rental history',
+            'Applicant may provide previous landlord references or rental records to help assess their history of fulfilling rental obligations, maintaining rental properties, and following lease agreements.',
+        ],
+        [
+            'Personal references',
+            'Applicant should provide contact information for at least one verifiable personal or professional reference who can confirm relevant information about the applicant.',
+        ],
+        [
+            'Application document completeness',
+            'Applicant must submit all required application information and supporting documents requested by the landlord before the screening process can be completed.',
+        ],
+    ];
+    $ownsTransaction = !$pdo->inTransaction();
+    if ($ownsTransaction) {
+        $pdo->beginTransaction();
+    }
+    try {
+        $marker = $pdo->prepare(
+            'INSERT IGNORE INTO screening_criteria_defaults_initialized (landlord_id) VALUES (:landlord_id)',
+        );
+        $marker->execute(['landlord_id' => $landlordId]);
+        if ($marker->rowCount() > 0) {
+            $insert = $pdo->prepare(
+                'INSERT IGNORE INTO screening_criteria (landlord_id, criteria_name, description, is_active)
+                 SELECT :landlord_id, :criteria_name, :description, 1
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM screening_criteria
+                     WHERE landlord_id = :existing_landlord_id
+                       AND LOWER(criteria_name) = LOWER(:existing_name)
+                 )',
+            );
+            foreach ($defaults as [$name, $description]) {
+                $insert->execute([
+                    'landlord_id' => $landlordId,
+                    'criteria_name' => $name,
+                    'description' => $description,
+                    'existing_landlord_id' => $landlordId,
+                    'existing_name' => $name,
+                ]);
+            }
+        }
+        if ($ownsTransaction) {
+            $pdo->commit();
+        }
+    } catch (Throwable $error) {
+        if ($ownsTransaction && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
+}
+
+function screeningEvaluationGet(PDO $pdo, array $user, int $applicationId): array
+{
+    $landlordId = landlordIdForUser($pdo, $user);
+    $applicationQuery = $pdo->prepare(
+        'SELECT a.application_id, a.application_status, a.application_date, a.desired_move_in_date,
+                a.employment_status, a.monthly_income, a.additional_notes,
+                CONCAT(t.first_name, " ", t.last_name) AS tenant_name
+         FROM tenant_application a
+         JOIN tenant t ON t.tenant_id = a.tenant_id
+         WHERE a.application_id = :application_id AND a.landlord_id = :landlord_id',
+    );
+    $applicationQuery->execute(['application_id' => $applicationId, 'landlord_id' => $landlordId]);
+    $application = $applicationQuery->fetch();
+    if (!$application) {
+        throw new ApiException(404, 'Application not found for this landlord.');
+    }
+    if ($application['application_status'] === 'withdrawn') {
+        throw new ApiException(409, 'Withdrawn applications cannot be screened.');
+    }
+
+    $screeningResponse = screeningCreate($pdo, $user, $applicationId, []);
+    $screening = $screeningResponse['body'];
+    $criteriaQuery = $pdo->prepare(
+        'SELECT c.criteria_id, c.criteria_name, c.description, c.is_active,
+                sr.result_id, sr.result_status, sr.remarks, sr.verified_at,
+                sr.evaluated_by, sr.created_at AS evaluation_created_at, sr.updated_at AS evaluation_updated_at,
+                CONCAT(evaluator.first_name, " ", evaluator.last_name) AS evaluated_by_name
+         FROM screening_criteria c
+         LEFT JOIN screening_result sr ON sr.criteria_id = c.criteria_id AND sr.screening_id = :screening_id
+         LEFT JOIN users evaluator_user ON evaluator_user.user_id = sr.evaluated_by
+         LEFT JOIN landlord evaluator ON evaluator.user_id = evaluator_user.user_id
+         WHERE c.landlord_id = :landlord_id
+           AND (c.is_active = TRUE OR sr.result_id IS NOT NULL)
+         ORDER BY c.is_active DESC, c.criteria_name ASC',
+    );
+    $criteriaQuery->execute(['screening_id' => $screening['screening_id'], 'landlord_id' => $landlordId]);
+    $criteria = $criteriaQuery->fetchAll();
+
+    $documentsQuery = $pdo->prepare(
+        'SELECT document_type, verification_status, uploaded_at
+         FROM application_document WHERE application_id = :application_id
+         ORDER BY uploaded_at DESC',
+    );
+    $documentsQuery->execute(['application_id' => $applicationId]);
+    $documents = $documentsQuery->fetchAll();
+
+    $summary = [
+        'total' => count($criteria),
+        'passed' => 0,
+        'failed' => 0,
+        'pending' => 0,
+        'not_applicable' => 0,
+    ];
+    foreach ($criteria as $criterion) {
+        $status = $criterion['result_status'] ?? 'pending';
+        if (array_key_exists($status, $summary)) {
+            $summary[$status]++;
+        }
+    }
+    $evaluated = $summary['passed'] + $summary['failed'] + $summary['not_applicable'];
+    $summary['completion_percent'] = $summary['total'] > 0
+        ? (int) round(($evaluated / $summary['total']) * 100)
+        : 0;
+
+    return ['status' => 200, 'body' => [
+        'application' => $application,
+        'screening' => $screening,
+        'criteria' => $criteria,
+        'documents' => $documents,
+        'summary' => $summary,
+    ]];
 }
 
 function profilePatch(PDO $pdo, array $user, array $input): array
@@ -250,39 +404,103 @@ function profilePatch(PDO $pdo, array $user, array $input): array
             $pdo->prepare($sql)->execute($params);
         }
     } else {
-        $tenantId = tenantIdForUser($pdo, $user);
+        $tenantId = applicantTenantIdForUser($pdo, $user);
         $params = ['tenant_id' => $tenantId];
         $changes = [];
 
-        if (array_key_exists('name', $input)) {
-            $name = trim((string) $input['name']);
-            if ($name !== '') {
-                [$firstName, $lastName] = splitPersonName($name);
+        if (array_key_exists('first_name', $input)) {
+            $firstName = trim((string) $input['first_name']);
+            if ($firstName !== '') {
                 $changes[] = 'first_name = :first_name';
-                $changes[] = 'last_name = :last_name';
                 $params['first_name'] = $firstName;
+            }
+        }
+
+        if (array_key_exists('middle_name', $input)) {
+            $middleName = trim((string) $input['middle_name']);
+            $changes[] = 'middle_name = :middle_name';
+            $params['middle_name'] = $middleName !== '' ? $middleName : null;
+        }
+
+        if (array_key_exists('last_name', $input)) {
+            $lastName = trim((string) $input['last_name']);
+            if ($lastName !== '') {
+                $changes[] = 'last_name = :last_name';
                 $params['last_name'] = $lastName;
             }
         }
 
+        if (array_key_exists('name', $input) && !array_key_exists('first_name', $input)) {
+            $name = trim((string) $input['name']);
+            if ($name !== '') {
+                [$firstName, $lastName] = splitPersonName($name);
+                $changes[] = 'first_name = :split_first_name';
+                $changes[] = 'last_name = :split_last_name';
+                $params['split_first_name'] = $firstName;
+                $params['split_last_name'] = $lastName;
+            }
+        }
+
+        if (array_key_exists('birthdate', $input)) {
+            $birthdate = trim((string) $input['birthdate']);
+            if ($birthdate !== '') {
+                $birthdateValue = DateTimeImmutable::createFromFormat('!Y-m-d', $birthdate);
+                if (!$birthdateValue || $birthdateValue->format('Y-m-d') !== $birthdate || $birthdateValue >= new DateTimeImmutable('today')) {
+                    throw new ApiException(422, 'Enter a valid birthdate in the past.');
+                }
+                $changes[] = 'birthdate = :birthdate';
+                $params['birthdate'] = $birthdateValue->format('Y-m-d');
+            } else {
+                $changes[] = 'birthdate = :birthdate';
+                $params['birthdate'] = null;
+            }
+        }
+
         if (array_key_exists('phone', $input)) {
+            $phone = trim((string) $input['phone']);
             $changes[] = 'phone = :phone';
-            $params['phone'] = trim((string) $input['phone']);
+            $params['phone'] = $phone !== '' ? $phone : null;
         }
 
         if (array_key_exists('current_address', $input)) {
+            $currentAddress = trim((string) $input['current_address']);
             $changes[] = 'current_address = :current_address';
-            $params['current_address'] = trim((string) $input['current_address']);
+            $params['current_address'] = $currentAddress !== '' ? $currentAddress : null;
         }
 
         if (array_key_exists('emergency_contact_name', $input)) {
+            $emergencyName = trim((string) $input['emergency_contact_name']);
             $changes[] = 'emergency_contact_name = :emergency_contact_name';
-            $params['emergency_contact_name'] = trim((string) $input['emergency_contact_name']);
+            $params['emergency_contact_name'] = $emergencyName !== '' ? $emergencyName : null;
         }
 
         if (array_key_exists('emergency_contact_phone', $input)) {
+            $emergencyPhone = trim((string) $input['emergency_contact_phone']);
             $changes[] = 'emergency_contact_phone = :emergency_contact_phone';
-            $params['emergency_contact_phone'] = trim((string) $input['emergency_contact_phone']);
+            $params['emergency_contact_phone'] = $emergencyPhone !== '' ? $emergencyPhone : null;
+        }
+
+        if (array_key_exists('employment_status', $input)) {
+            $emp = trim((string) $input['employment_status']);
+            if ($emp !== '' && !in_array($emp, ['full_time', 'part_time', 'contract', 'self_employed', 'unemployed', 'other'], true)) {
+                throw new ApiException(422, 'Select a valid employment status.');
+            }
+            $changes[] = 'employment_status = :employment_status';
+            $params['employment_status'] = $emp !== '' ? $emp : null;
+        }
+
+        if (array_key_exists('monthly_income', $input)) {
+            $income = $input['monthly_income'];
+            if ($income !== '' && $income !== null) {
+                if (!is_numeric($income) || (float) $income < 0 || (float) $income > 9999999999.99) {
+                    throw new ApiException(422, 'Enter a valid non-negative monthly income.');
+                }
+                $changes[] = 'monthly_income = :monthly_income';
+                $params['monthly_income'] = number_format((float) $income, 2, '.', '');
+            } else {
+                $changes[] = 'monthly_income = :monthly_income';
+                $params['monthly_income'] = null;
+            }
         }
 
         if (count($changes) > 0) {
@@ -305,6 +523,126 @@ function propertyList(PDO $pdo, array $user): array
     );
     $statement->execute(['landlord_id' => $landlordId]);
     return ['status' => 200, 'body' => $statement->fetchAll()];
+}
+
+function publicListingList(PDO $pdo): array
+{
+    $statement = $pdo->query(
+        "SELECT p.property_id, p.property_name, p.property_type, p.address, p.description,
+                p.construction_date, u.unit_id, u.unit_number, u.unit_type, u.bedroom_count,
+                u.bathroom_count, u.monthly_rent, u.security_deposit, u.description AS unit_description,
+                l.business_name, l.first_name AS landlord_first_name, l.last_name AS landlord_last_name,
+                COALESCE(r.average_rating, 0) AS average_rating, COALESCE(r.review_count, 0) AS review_count
+         FROM property p
+         JOIN rental_unit u ON u.property_id = p.property_id AND u.unit_status = 'vacant'
+         JOIN landlord l ON l.landlord_id = p.landlord_id
+         LEFT JOIN (
+             SELECT property_id, AVG(rating) AS average_rating, COUNT(*) AS review_count
+             FROM property_review
+             GROUP BY property_id
+         ) r ON r.property_id = p.property_id
+         WHERE p.property_status = 'active' AND p.rental_classification <> 'commercial'
+         ORDER BY p.created_at DESC, u.unit_number ASC",
+    );
+    $listings = $statement->fetchAll();
+    $images = $pdo->prepare(
+        'SELECT image_id, image_path FROM rental_unit_image WHERE unit_id = :unit_id ORDER BY image_id',
+    );
+    foreach ($listings as &$listing) {
+        $images->execute(['unit_id' => $listing['unit_id']]);
+        $listing['images'] = array_map(
+            static fn (array $image): array => [
+                'image_id' => (int) $image['image_id'],
+                'image_url' => unitImageUrl((string) $image['image_path']),
+            ],
+            $images->fetchAll(),
+        );
+        $listing['unit_id'] = (int) $listing['unit_id'];
+        $listing['property_id'] = (int) $listing['property_id'];
+        $listing['bedroom_count'] = (int) $listing['bedroom_count'];
+        $listing['bathroom_count'] = (int) $listing['bathroom_count'];
+        $listing['average_rating'] = round((float) $listing['average_rating'], 1);
+        $listing['review_count'] = (int) $listing['review_count'];
+    }
+    unset($listing);
+
+    return ['status' => 200, 'body' => $listings];
+}
+
+function propertyReviewList(PDO $pdo, int $propertyId): array
+{
+    $property = $pdo->prepare(
+        'SELECT 1 FROM property
+         WHERE property_id = :property_id AND property_status = \'active\'
+           AND rental_classification <> \'commercial\'
+         LIMIT 1',
+    );
+    $property->execute(['property_id' => $propertyId]);
+    if (!$property->fetch()) {
+        throw new ApiException(404, 'Listing was not found.');
+    }
+
+    $reviews = $pdo->prepare(
+        "SELECT r.review_id, r.rating, r.review_text, r.created_at,
+                CONCAT(t.first_name, ' ', LEFT(t.last_name, 1), '.') AS reviewer_name
+         FROM property_review r
+         JOIN tenant t ON t.tenant_id = r.tenant_id
+         WHERE r.property_id = :property_id
+         ORDER BY r.created_at DESC, r.review_id DESC",
+    );
+    $reviews->execute(['property_id' => $propertyId]);
+    return ['status' => 200, 'body' => $reviews->fetchAll()];
+}
+
+function propertyReviewCreate(PDO $pdo, array $user, int $propertyId, array $input): array
+{
+    if (($user['role'] ?? null) !== 'tenant') {
+        throw new ApiException(403, 'Only current or former tenants may review a listing.');
+    }
+
+    $tenantId = tenantIdForUser($pdo, $user);
+    $rating = filter_var($input['rating'] ?? null, FILTER_VALIDATE_INT);
+    $reviewText = trim((string) ($input['review_text'] ?? ''));
+    if ($rating === false || $rating < 1 || $rating > 5) {
+        throw new ApiException(422, 'Choose a rating from 1 to 5 stars.');
+    }
+    if ($reviewText === '' || mb_strlen($reviewText) > 3000) {
+        throw new ApiException(422, 'Write a review of 1 to 3000 characters.');
+    }
+
+    $lease = $pdo->prepare(
+        "SELECT 1
+         FROM tenant_application a
+         JOIN lease l ON l.application_id = a.application_id
+         JOIN rental_unit u ON u.unit_id = l.unit_id
+         WHERE a.tenant_id = :tenant_id AND u.property_id = :property_id
+           AND l.lease_status IN ('active', 'ended')
+         LIMIT 1",
+    );
+    $lease->execute(['tenant_id' => $tenantId, 'property_id' => $propertyId]);
+    if (!$lease->fetch()) {
+        throw new ApiException(403, 'A current or former lease at this property is required to leave a review.');
+    }
+
+    try {
+        $insert = $pdo->prepare(
+            'INSERT INTO property_review (property_id, tenant_id, rating, review_text)
+             VALUES (:property_id, :tenant_id, :rating, :review_text)',
+        );
+        $insert->execute([
+            'property_id' => $propertyId,
+            'tenant_id' => $tenantId,
+            'rating' => $rating,
+            'review_text' => $reviewText,
+        ]);
+    } catch (PDOException $error) {
+        if ($error->getCode() === '23000') {
+            throw new ApiException(409, 'You have already reviewed this listing.');
+        }
+        throw $error;
+    }
+
+    return ['status' => 201, 'body' => ['message' => 'Your review has been published.']];
 }
 
 function propertyCreate(PDO $pdo, array $user, array $input): array
@@ -695,9 +1033,13 @@ function applicationList(PDO $pdo, array $user): array
     if (($user['role'] ?? null) === 'landlord') {
         $landlordId = landlordIdForUser($pdo, $user);
         $statement = $pdo->prepare(
-            'SELECT a.*, CONCAT(t.first_name, " ", t.last_name) AS tenant_name
+            'SELECT a.*, CONCAT_WS(" ", t.first_name, NULLIF(t.middle_name, ""), t.last_name) AS tenant_name,
+                    t.birthdate, t.phone, t.current_address, t.emergency_contact_name, t.emergency_contact_phone,
+                    p.property_name, u.unit_number
              FROM tenant_application a
              JOIN tenant t ON t.tenant_id = a.tenant_id
+             LEFT JOIN rental_unit u ON u.unit_id = a.unit_id
+             LEFT JOIN property p ON p.property_id = u.property_id
              WHERE a.landlord_id = :landlord_id
              ORDER BY a.application_date DESC',
         );
@@ -707,9 +1049,12 @@ function applicationList(PDO $pdo, array $user): array
 
     $tenantId = applicantTenantIdForUser($pdo, $user);
     $statement = $pdo->prepare(
-        'SELECT a.*, CONCAT(t.first_name, " ", t.last_name) AS tenant_name
+        'SELECT a.*, CONCAT_WS(" ", t.first_name, NULLIF(t.middle_name, ""), t.last_name) AS tenant_name,
+                p.property_name, u.unit_number
          FROM tenant_application a
          JOIN tenant t ON t.tenant_id = a.tenant_id
+         LEFT JOIN rental_unit u ON u.unit_id = a.unit_id
+         LEFT JOIN property p ON p.property_id = u.property_id
          WHERE a.tenant_id = :tenant_id
          ORDER BY a.application_date DESC',
     );
@@ -724,32 +1069,72 @@ function applicationCreate(PDO $pdo, array $user, array $input): array
     }
 
     $tenantId = applicantTenantIdForUser($pdo, $user);
-    $landlordId = (int) ($input['landlord_id'] ?? 0);
-    if ($landlordId <= 0) {
-        throw new ApiException(422, 'A landlord is required.');
-    }
-
-    $statement = $pdo->prepare('SELECT landlord_id FROM landlord WHERE landlord_id = :landlord_id LIMIT 1');
-    $statement->execute(['landlord_id' => $landlordId]);
-    if (!$statement->fetch()) {
-        throw new ApiException(404, 'Landlord was not found.');
+    $unitId = (int) ($input['unit_id'] ?? 0);
+    if ($unitId <= 0) {
+        throw new ApiException(422, 'Choose a listing before submitting an application.');
     }
 
     $desiredMoveIn = $input['desired_move_in_date'] ?? null;
-    $employmentStatus = trim((string) ($input['employment_status'] ?? ''));
-    $monthlyIncome = isset($input['monthly_income']) ? (float) $input['monthly_income'] : null;
     $notes = trim((string) ($input['additional_notes'] ?? ''));
+    if ($desiredMoveIn !== null && $desiredMoveIn !== '' && !rentalDateIsValid((string) $desiredMoveIn)) {
+        throw new ApiException(422, 'Desired move-in date must be a valid calendar date.');
+    }
+
+    $unit = $pdo->prepare(
+        "SELECT u.unit_id, p.landlord_id, u.unit_status
+         FROM rental_unit u
+         JOIN property p ON p.property_id = u.property_id
+         WHERE u.unit_id = :unit_id AND p.property_status = 'active'
+         LIMIT 1",
+    );
+    $unit->execute(['unit_id' => $unitId]);
+    $listing = $unit->fetch();
+    if (!$listing || $listing['unit_status'] !== 'vacant') {
+        throw new ApiException(409, 'This listing is no longer available.');
+    }
+    $landlordId = (int) $listing['landlord_id'];
+    $duplicate = $pdo->prepare(
+        "SELECT 1 FROM tenant_application
+         WHERE tenant_id = :tenant_id AND unit_id = :unit_id
+           AND application_status NOT IN ('rejected', 'withdrawn')
+         LIMIT 1",
+    );
+    $duplicate->execute(['tenant_id' => $tenantId, 'unit_id' => $unitId]);
+    if ($duplicate->fetch()) {
+        throw new ApiException(409, 'You already have an active application for this listing.');
+    }
+
+    $tenantProfile = $pdo->prepare('SELECT * FROM tenant WHERE tenant_id = :tenant_id');
+    $tenantProfile->execute(['tenant_id' => $tenantId]);
+    $profile = $tenantProfile->fetch();
+
+    $docsStmt = $pdo->prepare('SELECT document_type FROM tenant_document WHERE tenant_id = :tenant_id');
+    $docsStmt->execute(['tenant_id' => $tenantId]);
+    $docTypes = $docsStmt->fetchAll(PDO::FETCH_COLUMN);
+
+    $missing = [];
+    if (empty($profile['phone'])) $missing[] = 'phone number';
+    if (empty($profile['current_address'])) $missing[] = 'current address';
+    if (empty($profile['birthdate'])) $missing[] = 'birthdate';
+    if (empty($profile['emergency_contact_name']) || empty($profile['emergency_contact_phone'])) $missing[] = 'emergency contact details';
+    if (!in_array('government_id', $docTypes, true)) $missing[] = 'government-issued photo ID';
+    if (!in_array('proof_of_income', $docTypes, true)) $missing[] = 'proof of income';
+
+    if (count($missing) > 0) {
+        throw new ApiException(422, 'Please complete your profile and upload required documents before applying. Missing: ' . implode(', ', $missing) . '.');
+    }
 
     $insert = $pdo->prepare(
-        'INSERT INTO tenant_application (tenant_id, landlord_id, desired_move_in_date, employment_status, monthly_income, additional_notes, application_status, reviewed_at)
-         VALUES (:tenant_id, :landlord_id, :desired_move_in_date, :employment_status, :monthly_income, :additional_notes, :application_status, NULL)',
+        'INSERT INTO tenant_application (tenant_id, landlord_id, unit_id, desired_move_in_date, employment_status, monthly_income, additional_notes, application_status, reviewed_at)
+         VALUES (:tenant_id, :landlord_id, :unit_id, :desired_move_in_date, :employment_status, :monthly_income, :additional_notes, :application_status, NULL)',
     );
     $insert->execute([
         'tenant_id' => $tenantId,
         'landlord_id' => $landlordId,
+        'unit_id' => $unitId,
         'desired_move_in_date' => $desiredMoveIn !== null && $desiredMoveIn !== '' ? $desiredMoveIn : null,
-        'employment_status' => $employmentStatus !== '' ? $employmentStatus : null,
-        'monthly_income' => $monthlyIncome !== null && $monthlyIncome > 0 ? number_format($monthlyIncome, 2, '.', '') : null,
+        'employment_status' => $profile['employment_status'],
+        'monthly_income' => $profile['monthly_income'],
         'additional_notes' => $notes !== '' ? $notes : null,
         'application_status' => 'submitted',
     ]);
@@ -834,21 +1219,275 @@ function applicationDocumentsList(PDO $pdo, array $user, int $applicationId): ar
         throw new ApiException(404, 'Application not found.');
     }
 
+    assertApplicationDocumentAccess($pdo, $user, $application);
+
+    $documents = $pdo->prepare(
+        "SELECT document_id, document_type, original_name AS file_path, verification_status,
+                uploaded_at, 'tenant' AS document_source
+         FROM tenant_document WHERE tenant_id = :tenant_id
+         UNION ALL
+         SELECT document_id, document_type, file_path, verification_status,
+                uploaded_at, 'application' AS document_source
+         FROM application_document WHERE application_id = :application_id
+         ORDER BY uploaded_at DESC",
+    );
+    $documents->execute([
+        'tenant_id' => $application['tenant_id'],
+        'application_id' => $applicationId,
+    ]);
+    return ['status' => 200, 'body' => $documents->fetchAll()];
+}
+
+function assertTenantDocumentAccess(PDO $pdo, array $user, int $tenantId): void
+{
     if (($user['role'] ?? null) === 'landlord') {
         $landlordId = landlordIdForUser($pdo, $user);
-        if ((int) $application['landlord_id'] !== $landlordId) {
-            throw new ApiException(403, 'You do not have access to this application.');
+        $statement = $pdo->prepare(
+            'SELECT 1 FROM tenant_application
+             WHERE tenant_id = :tenant_id AND landlord_id = :landlord_id LIMIT 1',
+        );
+        $statement->execute(['tenant_id' => $tenantId, 'landlord_id' => $landlordId]);
+        if ($statement->fetch()) {
+            return;
         }
-    } elseif (($user['role'] ?? null) === 'tenant') {
-        $tenantId = tenantIdForUser($pdo, $user);
-        if ((int) $application['tenant_id'] !== $tenantId) {
-            throw new ApiException(403, 'You do not have access to this application.');
+        throw new ApiException(403, 'You do not have access to this document.');
+    }
+
+    if (in_array($user['role'] ?? null, ['applicant', 'tenant'], true)
+        && $tenantId === applicantTenantIdForUser($pdo, $user)) {
+        return;
+    }
+
+    throw new ApiException(403, 'You do not have access to this document.');
+}
+
+function tenantDocumentDownload(PDO $pdo, array $user, int $documentId): array
+{
+    $statement = $pdo->prepare('SELECT * FROM tenant_document WHERE document_id = :document_id LIMIT 1');
+    $statement->execute(['document_id' => $documentId]);
+    $document = $statement->fetch();
+    if (!$document) {
+        throw new ApiException(404, 'Document was not found.');
+    }
+    assertTenantDocumentAccess($pdo, $user, (int) $document['tenant_id']);
+
+    $path = dirname(__DIR__) . '/storage/private-documents/' . basename((string) $document['file_path']);
+    if (!is_file($path) || !is_readable($path)) {
+        throw new ApiException(404, 'The document file is unavailable.');
+    }
+
+    return ['status' => 200, 'file' => [
+        'path' => $path,
+        'content_type' => $document['content_type'],
+        'original_name' => $document['original_name'],
+    ]];
+}
+
+function tenantDocumentVerificationUpdate(PDO $pdo, array $user, int $documentId, array $input): array
+{
+    $status = strtolower(trim((string) ($input['verification_status'] ?? '')));
+    if (!in_array($status, ['pending', 'verified', 'rejected'], true)) {
+        throw new ApiException(422, 'Verification status is invalid.');
+    }
+
+    $statement = $pdo->prepare('SELECT * FROM tenant_document WHERE document_id = :document_id LIMIT 1');
+    $statement->execute(['document_id' => $documentId]);
+    $document = $statement->fetch();
+    if (!$document) {
+        throw new ApiException(404, 'Document was not found.');
+    }
+    assertTenantDocumentAccess($pdo, $user, (int) $document['tenant_id']);
+    if (($user['role'] ?? null) !== 'landlord' && $status !== 'pending') {
+        throw new ApiException(403, 'Applicants and tenants may only reset document verification to pending.');
+    }
+
+    $update = $pdo->prepare(
+        'UPDATE tenant_document SET verification_status = :status WHERE document_id = :document_id',
+    );
+    $update->execute(['status' => $status, 'document_id' => $documentId]);
+    return ['status' => 200, 'body' => [
+        'document_id' => (int) $documentId,
+        'verification_status' => $status,
+    ]];
+}
+
+function tenantDocumentUpload(PDO $pdo, array $user, array $uploads, array $input): array
+{
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Applicant or tenant access is required.');
+    }
+    $tenantId = applicantTenantIdForUser($pdo, $user);
+
+    $allowedTypes = ['government_id', 'proof_of_income', 'reference_letter'];
+    $allowedMimeTypes = [
+        'application/pdf' => '.pdf',
+        'image/jpeg' => '.jpg',
+        'image/png' => '.png',
+    ];
+
+    $documentType = strtolower(trim((string) ($input['document_type'] ?? '')));
+    $upload = null;
+    if ($documentType !== '' && isset($uploads['file']) && is_array($uploads['file'])) {
+        $upload = $uploads['file'];
+    } elseif ($documentType !== '' && isset($uploads[$documentType]) && is_array($uploads[$documentType])) {
+        $upload = $uploads[$documentType];
+    } else {
+        foreach ($allowedTypes as $type) {
+            if (isset($uploads[$type]) && is_array($uploads[$type]) && ($uploads[$type]['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+                $documentType = $type;
+                $upload = $uploads[$type];
+                break;
+            }
         }
     }
 
-    $documents = $pdo->prepare('SELECT * FROM application_document WHERE application_id = :application_id ORDER BY uploaded_at DESC');
-    $documents->execute(['application_id' => $applicationId]);
-    return ['status' => 200, 'body' => $documents->fetchAll()];
+    if (!in_array($documentType, $allowedTypes, true)) {
+        throw new ApiException(422, 'Select a valid document type: government_id, proof_of_income, or reference_letter.');
+    }
+
+    if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        throw new ApiException(422, 'Please choose a document file to upload.');
+    }
+    if (($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+        throw new ApiException(422, 'File upload failed. The file must be no larger than 10 MB.');
+    }
+
+    $temporaryPath = (string) ($upload['tmp_name'] ?? '');
+    $fileSize = (int) ($upload['size'] ?? 0);
+    if ($fileSize <= 0 || $fileSize > 10 * 1024 * 1024 || !is_uploaded_file($temporaryPath)) {
+        throw new ApiException(422, 'Document file must be a valid upload no larger than 10 MB.');
+    }
+
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    if ($finfo === false) {
+        throw new ApiException(500, 'Document validation is unavailable.');
+    }
+    $contentType = finfo_file($finfo, $temporaryPath);
+    finfo_close($finfo);
+
+    if (!isset($allowedMimeTypes[$contentType])) {
+        throw new ApiException(422, 'Document must be a PDF, JPEG, or PNG file.');
+    }
+
+    $extension = $allowedMimeTypes[$contentType];
+    $originalName = basename((string) ($upload['name'] ?? 'document'));
+    if ($originalName === '' || strlen($originalName) > 255) {
+        throw new ApiException(422, 'Document file name must be no longer than 255 characters.');
+    }
+
+    $directory = dirname(__DIR__) . '/storage/private-documents';
+    if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+        throw new ApiException(500, 'Private document storage is unavailable.');
+    }
+
+    $filename = bin2hex(random_bytes(24)) . $extension;
+    $destination = $directory . '/' . $filename;
+    if (!move_uploaded_file($temporaryPath, $destination)) {
+        throw new ApiException(500, 'Unable to save the uploaded document.');
+    }
+
+    $existingStmt = $pdo->prepare('SELECT document_id, file_path FROM tenant_document WHERE tenant_id = :tenant_id AND document_type = :document_type LIMIT 1');
+    $existingStmt->execute(['tenant_id' => $tenantId, 'document_type' => $documentType]);
+    $existing = $existingStmt->fetch();
+
+    if ($existing) {
+        $oldFile = $directory . '/' . basename((string) $existing['file_path']);
+        if (is_file($oldFile)) {
+            @unlink($oldFile);
+        }
+        $updateStmt = $pdo->prepare(
+            'UPDATE tenant_document
+             SET file_path = :file_path, original_name = :original_name, content_type = :content_type, file_size = :file_size, verification_status = "pending", uploaded_at = CURRENT_TIMESTAMP
+             WHERE document_id = :document_id',
+        );
+        $updateStmt->execute([
+            'file_path' => $filename,
+            'original_name' => $originalName,
+            'content_type' => $contentType,
+            'file_size' => $fileSize,
+            'document_id' => $existing['document_id'],
+        ]);
+        $documentId = (int) $existing['document_id'];
+    } else {
+        $insertStmt = $pdo->prepare(
+            'INSERT INTO tenant_document (tenant_id, document_type, file_path, original_name, content_type, file_size, verification_status, uploaded_at)
+             VALUES (:tenant_id, :document_type, :file_path, :original_name, :content_type, :file_size, "pending", CURRENT_TIMESTAMP)',
+        );
+        $insertStmt->execute([
+            'tenant_id' => $tenantId,
+            'document_type' => $documentType,
+            'file_path' => $filename,
+            'original_name' => $originalName,
+            'content_type' => $contentType,
+            'file_size' => $fileSize,
+        ]);
+        $documentId = (int) $pdo->lastInsertId();
+    }
+
+    $listStmt = $pdo->prepare(
+        'SELECT document_id, document_type, original_name, file_size, content_type, verification_status, uploaded_at
+         FROM tenant_document WHERE tenant_id = :tenant_id ORDER BY uploaded_at DESC',
+    );
+    $listStmt->execute(['tenant_id' => $tenantId]);
+    $documents = $listStmt->fetchAll();
+
+    return [
+        'status' => 200,
+        'body' => [
+            'message' => 'Document uploaded successfully.',
+            'document_id' => $documentId,
+            'documents' => $documents,
+        ],
+    ];
+}
+
+function tenantDocumentsList(PDO $pdo, array $user): array
+{
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Applicant or tenant access is required.');
+    }
+    $tenantId = applicantTenantIdForUser($pdo, $user);
+
+    $listStmt = $pdo->prepare(
+        'SELECT document_id, document_type, original_name, file_size, content_type, verification_status, uploaded_at
+         FROM tenant_document WHERE tenant_id = :tenant_id ORDER BY uploaded_at DESC',
+    );
+    $listStmt->execute(['tenant_id' => $tenantId]);
+    return ['status' => 200, 'body' => $listStmt->fetchAll()];
+}
+
+function tenantDocumentDelete(PDO $pdo, array $user, int $documentId): array
+{
+    if (!in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Applicant or tenant access is required.');
+    }
+    $tenantId = applicantTenantIdForUser($pdo, $user);
+
+    $stmt = $pdo->prepare('SELECT * FROM tenant_document WHERE document_id = :document_id AND tenant_id = :tenant_id LIMIT 1');
+    $stmt->execute(['document_id' => $documentId, 'tenant_id' => $tenantId]);
+    $document = $stmt->fetch();
+    if (!$document) {
+        throw new ApiException(404, 'Document not found.');
+    }
+
+    $path = dirname(__DIR__) . '/storage/private-documents/' . basename((string) $document['file_path']);
+    if (is_file($path)) {
+        @unlink($path);
+    }
+
+    $deleteStmt = $pdo->prepare('DELETE FROM tenant_document WHERE document_id = :document_id');
+    $deleteStmt->execute(['document_id' => $documentId]);
+
+    $listStmt = $pdo->prepare(
+        'SELECT document_id, document_type, original_name, file_size, content_type, verification_status, uploaded_at
+         FROM tenant_document WHERE tenant_id = :tenant_id ORDER BY uploaded_at DESC',
+    );
+    $listStmt->execute(['tenant_id' => $tenantId]);
+
+    return ['status' => 200, 'body' => [
+        'message' => 'Document deleted.',
+        'documents' => $listStmt->fetchAll(),
+    ]];
 }
 
 function applicationDocumentCreate(PDO $pdo, array $user, int $applicationId, array $input): array
@@ -860,17 +1499,10 @@ function applicationDocumentCreate(PDO $pdo, array $user, int $applicationId, ar
         throw new ApiException(404, 'Application not found.');
     }
 
-    if (($user['role'] ?? null) === 'landlord') {
-        $landlordId = landlordIdForUser($pdo, $user);
-        if ((int) $application['landlord_id'] !== $landlordId) {
-            throw new ApiException(403, 'You do not have access to this application.');
-        }
-    } elseif (($user['role'] ?? null) === 'tenant') {
-        $tenantId = tenantIdForUser($pdo, $user);
-        if ((int) $application['tenant_id'] !== $tenantId) {
-            throw new ApiException(403, 'You do not have access to this application.');
-        }
+    if (!in_array($user['role'] ?? null, ['landlord', 'applicant', 'tenant'], true)) {
+        throw new ApiException(403, 'Access denied.');
     }
+    assertApplicationDocumentAccess($pdo, $user, $application);
 
     $documentType = strtolower(trim((string) ($input['document_type'] ?? '')));
     $filePath = trim((string) ($input['file_path'] ?? ''));
@@ -914,18 +1546,18 @@ function applicationDocumentVerificationUpdate(PDO $pdo, array $user, int $docum
     }
 
     if (($user['role'] ?? null) === 'landlord') {
-        $landlordId = landlordIdForUser($pdo, $user);
-        if ((int) $document['landlord_id'] !== $landlordId) {
+        if ((int) $document['landlord_id'] !== landlordIdForUser($pdo, $user)) {
             throw new ApiException(403, 'You do not have access to this document.');
         }
-    } elseif (($user['role'] ?? null) === 'tenant') {
-        $tenantId = tenantIdForUser($pdo, $user);
-        if ((int) $document['tenant_id'] !== $tenantId) {
+    } elseif (in_array($user['role'] ?? null, ['applicant', 'tenant'], true)) {
+        if ((int) $document['tenant_id'] !== applicantTenantIdForUser($pdo, $user)) {
             throw new ApiException(403, 'You do not have access to this document.');
         }
         if ($status !== 'pending') {
-            throw new ApiException(403, 'Tenants may only set document verification back to pending.');
+            throw new ApiException(403, 'Applicants and tenants may only set document verification back to pending.');
         }
+    } else {
+        throw new ApiException(403, 'Access denied.');
     }
 
     $update = $pdo->prepare('UPDATE application_document SET verification_status = :status WHERE document_id = :document_id');
@@ -936,9 +1568,25 @@ function applicationDocumentVerificationUpdate(PDO $pdo, array $user, int $docum
     return ['status' => 200, 'body' => $row->fetch()];
 }
 
+function assertApplicationDocumentAccess(PDO $pdo, array $user, array $application): void
+{
+    if (($user['role'] ?? null) === 'landlord') {
+        if ((int) $application['landlord_id'] !== landlordIdForUser($pdo, $user)) {
+            throw new ApiException(403, 'You do not have access to this application.');
+        }
+        return;
+    }
+    if (in_array($user['role'] ?? null, ['applicant', 'tenant'], true)
+        && (int) $application['tenant_id'] === applicantTenantIdForUser($pdo, $user)) {
+        return;
+    }
+    throw new ApiException(403, 'You do not have access to this application.');
+}
+
 function screeningCriteriaList(PDO $pdo, array $user): array
 {
     $landlordId = landlordIdForUser($pdo, $user);
+    seedDefaultScreeningCriteria($pdo, $landlordId);
     $statement = $pdo->prepare(
         'SELECT * FROM screening_criteria WHERE landlord_id = :landlord_id ORDER BY criteria_name ASC',
     );
@@ -950,22 +1598,54 @@ function screeningCriterionCreate(PDO $pdo, array $user, array $input): array
 {
     $landlordId = landlordIdForUser($pdo, $user);
     $name = trim((string) ($input['criteria_name'] ?? $input['name'] ?? ''));
-    if ($name === '') {
-        throw new ApiException(422, 'Criteria name is required.');
+    $description = trim((string) ($input['description'] ?? ''));
+    if ($name === '' || mb_strlen($name) > 150) {
+        throw new ApiException(422, 'Criteria name is required and must be 150 characters or fewer.');
+    }
+    if (mb_strlen($description) > 5000) {
+        throw new ApiException(422, 'Criterion description must be 5000 characters or fewer.');
+    }
+    if (array_key_exists('is_active', $input)
+        && !in_array($input['is_active'], [true, false, 0, 1, '0', '1'], true)) {
+        throw new ApiException(422, 'Criterion active state must be a boolean.');
+    }
+    $duplicate = $pdo->prepare(
+        'SELECT criteria_id FROM screening_criteria
+         WHERE landlord_id = :landlord_id AND LOWER(criteria_name) = LOWER(:criteria_name) LIMIT 1',
+    );
+    $duplicate->execute(['landlord_id' => $landlordId, 'criteria_name' => $name]);
+    if ($duplicate->fetchColumn()) {
+        throw new ApiException(409, 'A screening criterion with this name already exists.');
     }
 
-    $statement = $pdo->prepare(
-        'INSERT INTO screening_criteria (landlord_id, criteria_name, description, is_active)
-         VALUES (:landlord_id, :criteria_name, :description, :is_active)',
-    );
-    $statement->execute([
-        'landlord_id' => $landlordId,
-        'criteria_name' => $name,
-        'description' => trim((string) ($input['description'] ?? '')) !== '' ? trim((string) $input['description']) : null,
-        'is_active' => (bool) ($input['is_active'] ?? true),
-    ]);
+    $pdo->beginTransaction();
+    try {
+        $statement = $pdo->prepare(
+            'INSERT INTO screening_criteria (landlord_id, criteria_name, description, is_active)
+             VALUES (:landlord_id, :criteria_name, :description, :is_active)',
+        );
+        $statement->execute([
+            'landlord_id' => $landlordId,
+            'criteria_name' => $name,
+            'description' => $description !== '' ? $description : null,
+            'is_active' => array_key_exists('is_active', $input) ? (bool) $input['is_active'] : true,
+        ]);
 
-    $criteriaId = (int) $pdo->lastInsertId();
+        $criteriaId = (int) $pdo->lastInsertId();
+        recordAudit($pdo, $user, 'screening_criterion_created', 'screening_criteria', $criteriaId, [
+            'criteria_name' => $name,
+            'is_active' => array_key_exists('is_active', $input) ? (bool) $input['is_active'] : true,
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($error instanceof PDOException && (string) $error->getCode() === '23000') {
+            throw new ApiException(409, 'A screening criterion with this name already exists.');
+        }
+        throw $error;
+    }
     $row = $pdo->prepare('SELECT * FROM screening_criteria WHERE criteria_id = :criteria_id LIMIT 1');
     $row->execute(['criteria_id' => $criteriaId]);
     return ['status' => 201, 'body' => $row->fetch()];
@@ -976,33 +1656,79 @@ function screeningCriterionUpdate(PDO $pdo, array $user, int $criteriaId, array 
     $landlordId = landlordIdForUser($pdo, $user);
     $statement = $pdo->prepare('SELECT * FROM screening_criteria WHERE criteria_id = :criteria_id AND landlord_id = :landlord_id LIMIT 1');
     $statement->execute(['criteria_id' => $criteriaId, 'landlord_id' => $landlordId]);
-    if (!$statement->fetch()) {
+    $criterion = $statement->fetch();
+    if (!$criterion) {
         throw new ApiException(404, 'Screening criterion not found.');
     }
 
-    $name = trim((string) ($input['criteria_name'] ?? $input['name'] ?? ''));
-    $description = $input['description'] ?? null;
-    $isActive = array_key_exists('is_active', $input) ? (bool) $input['is_active'] : null;
+    $name = array_key_exists('criteria_name', $input) || array_key_exists('name', $input)
+        ? trim((string) ($input['criteria_name'] ?? $input['name'] ?? ''))
+        : (string) $criterion['criteria_name'];
+    $description = array_key_exists('description', $input)
+        ? trim((string) ($input['description'] ?? ''))
+        : $criterion['description'];
+    if ($name === '' || mb_strlen($name) > 150) {
+        throw new ApiException(422, 'Criteria name is required and must be 150 characters or fewer.');
+    }
+    if ($description !== null && mb_strlen((string) $description) > 5000) {
+        throw new ApiException(422, 'Criterion description must be 5000 characters or fewer.');
+    }
+    if (array_key_exists('is_active', $input)
+        && !in_array($input['is_active'], [true, false, 0, 1, '0', '1'], true)) {
+        throw new ApiException(422, 'Criterion active state must be a boolean.');
+    }
+    $duplicate = $pdo->prepare(
+        'SELECT criteria_id FROM screening_criteria
+         WHERE landlord_id = :landlord_id AND LOWER(criteria_name) = LOWER(:criteria_name)
+           AND criteria_id <> :criteria_id LIMIT 1',
+    );
+    $duplicate->execute([
+        'landlord_id' => $landlordId,
+        'criteria_name' => $name,
+        'criteria_id' => $criteriaId,
+    ]);
+    if ($duplicate->fetchColumn()) {
+        throw new ApiException(409, 'A screening criterion with this name already exists.');
+    }
 
     $updates = [];
     $params = ['criteria_id' => $criteriaId];
 
-    if ($name !== '') {
-        $updates[] = 'criteria_name = :criteria_name';
-        $params['criteria_name'] = $name;
-    }
-    if (array_key_exists('description', $input)) {
-        $updates[] = 'description = :description';
-        $params['description'] = $description !== null && trim((string) $description) !== '' ? trim((string) $description) : null;
-    }
-    if ($isActive !== null) {
-        $updates[] = 'is_active = :is_active';
-        $params['is_active'] = $isActive ? 1 : 0;
-    }
+    $updates[] = 'criteria_name = :criteria_name';
+    $params['criteria_name'] = $name;
+    $updates[] = 'description = :description';
+    $params['description'] = $description !== null && $description !== '' ? $description : null;
+    $updates[] = 'is_active = :is_active';
+    $params['is_active'] = array_key_exists('is_active', $input)
+        ? (bool) $input['is_active']
+        : (bool) $criterion['is_active'];
 
-    if (count($updates) > 0) {
+    $pdo->beginTransaction();
+    try {
         $sql = 'UPDATE screening_criteria SET ' . implode(', ', $updates) . ' WHERE criteria_id = :criteria_id';
         $pdo->prepare($sql)->execute($params);
+        recordAudit($pdo, $user, 'screening_criterion_updated', 'screening_criteria', $criteriaId, [
+            'criteria_name' => $name,
+            'is_active' => (bool) $params['is_active'],
+        ]);
+        $screenings = $pdo->prepare(
+            'SELECT s.screening_id FROM screening s
+             JOIN tenant_application a ON a.application_id = s.application_id
+             WHERE a.landlord_id = :landlord_id',
+        );
+        $screenings->execute(['landlord_id' => $landlordId]);
+        foreach ($screenings->fetchAll(PDO::FETCH_COLUMN) as $screeningId) {
+            refreshScreeningStatus($pdo, (int) $screeningId, $landlordId);
+        }
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($error instanceof PDOException && (string) $error->getCode() === '23000') {
+            throw new ApiException(409, 'A screening criterion with this name already exists.');
+        }
+        throw $error;
     }
 
     $row = $pdo->prepare('SELECT * FROM screening_criteria WHERE criteria_id = :criteria_id LIMIT 1');
@@ -1010,42 +1736,139 @@ function screeningCriterionUpdate(PDO $pdo, array $user, int $criteriaId, array 
     return ['status' => 200, 'body' => $row->fetch()];
 }
 
+function screeningCriterionDelete(PDO $pdo, array $user, int $criteriaId): array
+{
+    $landlordId = landlordIdForUser($pdo, $user);
+    $pdo->beginTransaction();
+    try {
+        $statement = $pdo->prepare(
+            'SELECT * FROM screening_criteria
+             WHERE criteria_id = :criteria_id AND landlord_id = :landlord_id FOR UPDATE',
+        );
+        $statement->execute(['criteria_id' => $criteriaId, 'landlord_id' => $landlordId]);
+        $criterion = $statement->fetch();
+        if (!$criterion) {
+            throw new ApiException(404, 'Screening criterion not found.');
+        }
+        $usage = $pdo->prepare('SELECT COUNT(*) FROM screening_result WHERE criteria_id = :criteria_id');
+        $usage->execute(['criteria_id' => $criteriaId]);
+        if ((int) $usage->fetchColumn() > 0) {
+            throw new ApiException(409, 'This criterion has evaluation history and cannot be deleted. Deactivate it to preserve the record.');
+        }
+        $pdo->prepare('DELETE FROM screening_criteria WHERE criteria_id = :criteria_id')
+            ->execute(['criteria_id' => $criteriaId]);
+        recordAudit($pdo, $user, 'screening_criterion_deleted', 'screening_criteria', $criteriaId, [
+            'criteria_name' => $criterion['criteria_name'],
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if ($error instanceof PDOException && (string) $error->getCode() === '23000') {
+            throw new ApiException(409, 'This criterion has evaluation history and cannot be deleted. Deactivate it to preserve the record.');
+        }
+        throw $error;
+    }
+    return ['status' => 200, 'body' => ['deleted' => true, 'criteria_id' => $criteriaId]];
+}
+
+function refreshScreeningStatus(PDO $pdo, int $screeningId, int $landlordId): void
+{
+    $activeCountQuery = $pdo->prepare(
+        'SELECT COUNT(*) FROM screening_criteria
+         WHERE landlord_id = :landlord_id AND is_active = TRUE',
+    );
+    $activeCountQuery->execute(['landlord_id' => $landlordId]);
+    $activeCount = (int) $activeCountQuery->fetchColumn();
+    $resultCounts = $pdo->prepare(
+        "SELECT
+            SUM(CASE WHEN sr.result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN sr.result_status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+            COUNT(sr.result_id) AS result_count
+         FROM screening_result sr
+         JOIN screening_criteria sc ON sc.criteria_id = sr.criteria_id
+         WHERE sr.screening_id = :screening_id AND sc.is_active = TRUE",
+    );
+    $resultCounts->execute(['screening_id' => $screeningId]);
+    $counts = $resultCounts->fetch();
+    $pendingCount = (int) $counts['pending_count'] + max(0, $activeCount - (int) $counts['result_count']);
+    $status = (int) $counts['failed_count'] > 0
+        ? 'failed'
+        : ($activeCount > 0 && $pendingCount === 0 ? 'passed' : 'in_progress');
+    $pdo->prepare('UPDATE screening SET screening_status = :status WHERE screening_id = :screening_id')
+        ->execute(['status' => $status, 'screening_id' => $screeningId]);
+}
+
 function screeningCreate(PDO $pdo, array $user, int $applicationId, array $input): array
 {
     $landlordId = landlordIdForUser($pdo, $user);
-    $statement = $pdo->prepare('SELECT * FROM tenant_application WHERE application_id = :application_id LIMIT 1');
-    $statement->execute(['application_id' => $applicationId]);
-    $application = $statement->fetch();
-    if (!$application) {
-        throw new ApiException(404, 'Application not found.');
-    }
-    if ((int) $application['landlord_id'] !== $landlordId) {
-        throw new ApiException(403, 'You do not have access to this application.');
-    }
-
-    $existing = $pdo->prepare('SELECT * FROM screening WHERE application_id = :application_id LIMIT 1');
-    $existing->execute(['application_id' => $applicationId]);
-    $screening = $existing->fetch();
-    if ($screening) {
-        return ['status' => 200, 'body' => $screening];
-    }
-
     $remarks = trim((string) ($input['remarks'] ?? ''));
-    $statement = $pdo->prepare(
-        'INSERT INTO screening (application_id, screened_by, screening_status, remarks)
-         VALUES (:application_id, :screened_by, :screening_status, :remarks)',
-    );
-    $statement->execute([
-        'application_id' => $applicationId,
-        'screened_by' => $user['user_id'],
-        'screening_status' => 'in_progress',
-        'remarks' => $remarks !== '' ? $remarks : null,
-    ]);
+    if (mb_strlen($remarks) > 5000) {
+        throw new ApiException(422, 'Reviewer remarks must be 5000 characters or fewer.');
+    }
+    seedDefaultScreeningCriteria($pdo, $landlordId);
+    $pdo->beginTransaction();
+    try {
+        $applicationQuery = $pdo->prepare(
+            'SELECT * FROM tenant_application WHERE application_id = :application_id FOR UPDATE',
+        );
+        $applicationQuery->execute(['application_id' => $applicationId]);
+        $application = $applicationQuery->fetch();
+        if (!$application) {
+            throw new ApiException(404, 'Application not found.');
+        }
+        if ((int) $application['landlord_id'] !== $landlordId) {
+            throw new ApiException(403, 'You do not have access to this application.');
+        }
+        if ($application['application_status'] === 'withdrawn') {
+            throw new ApiException(409, 'Withdrawn applications cannot be screened.');
+        }
 
-    $screeningId = (int) $pdo->lastInsertId();
+        $existing = $pdo->prepare('SELECT * FROM screening WHERE application_id = :application_id');
+        $existing->execute(['application_id' => $applicationId]);
+        $screening = $existing->fetch();
+        if (!$screening && in_array($application['application_status'], ['approved', 'rejected'], true)) {
+            throw new ApiException(409, 'A screening must be started before an application receives a final decision.');
+        }
+        if ($screening) {
+            $screeningId = (int) $screening['screening_id'];
+        } else {
+            $statement = $pdo->prepare(
+                'INSERT INTO screening (application_id, screened_by, screening_status, remarks)
+                 VALUES (:application_id, :screened_by, :screening_status, :remarks)',
+            );
+            $statement->execute([
+                'application_id' => $applicationId,
+                'screened_by' => $user['user_id'],
+                'screening_status' => 'in_progress',
+                'remarks' => $remarks !== '' ? $remarks : null,
+            ]);
+            $screeningId = (int) $pdo->lastInsertId();
+            recordAudit($pdo, $user, 'screening_started', 'screening', $screeningId, [
+                'application_id' => $applicationId,
+            ]);
+        }
+        $pdo->prepare(
+            "INSERT IGNORE INTO screening_result (screening_id, criteria_id, result_status)
+             SELECT :screening_id, criteria_id, 'pending'
+             FROM screening_criteria WHERE landlord_id = :landlord_id AND is_active = TRUE",
+        )->execute(['screening_id' => $screeningId, 'landlord_id' => $landlordId]);
+        refreshScreeningStatus($pdo, $screeningId, $landlordId);
+        if ($remarks !== '') {
+            $pdo->prepare('UPDATE screening SET remarks = :remarks WHERE screening_id = :screening_id')
+                ->execute(['remarks' => $remarks, 'screening_id' => $screeningId]);
+        }
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
+    }
     $row = $pdo->prepare('SELECT * FROM screening WHERE screening_id = :screening_id LIMIT 1');
     $row->execute(['screening_id' => $screeningId]);
-    return ['status' => 201, 'body' => $row->fetch()];
+    return ['status' => $screening ? 200 : 201, 'body' => $row->fetch()];
 }
 
 function screeningResultCreate(PDO $pdo, array $user, int $screeningId, array $input): array
@@ -1070,7 +1893,8 @@ function screeningResultCreate(PDO $pdo, array $user, int $screeningId, array $i
 
     $statement = $pdo->prepare('SELECT * FROM screening_criteria WHERE criteria_id = :criteria_id AND landlord_id = :landlord_id LIMIT 1');
     $statement->execute(['criteria_id' => $criteriaId, 'landlord_id' => $landlordId]);
-    if (!$statement->fetch()) {
+    $criterion = $statement->fetch();
+    if (!$criterion) {
         throw new ApiException(404, 'Criteria does not belong to this landlord.');
     }
 
@@ -1080,47 +1904,83 @@ function screeningResultCreate(PDO $pdo, array $user, int $screeningId, array $i
     }
 
     $remarks = trim((string) ($input['remarks'] ?? ''));
+    if (mb_strlen($remarks) > 5000) {
+        throw new ApiException(422, 'Evaluation remarks must be 5000 characters or fewer.');
+    }
     $verifiedAt = $status === 'pending' ? null : date('Y-m-d H:i:s');
+    $pdo->beginTransaction();
+    try {
+        $applicationStatus = $pdo->prepare(
+            'SELECT a.application_status
+             FROM screening s JOIN tenant_application a ON a.application_id = s.application_id
+             WHERE s.screening_id = :screening_id FOR UPDATE',
+        );
+        $applicationStatus->execute(['screening_id' => $screeningId]);
+        $currentApplicationStatus = $applicationStatus->fetchColumn();
+        if ($currentApplicationStatus === false) {
+            throw new ApiException(404, 'Screening not found.');
+        }
+        if (in_array($currentApplicationStatus, ['approved', 'rejected', 'withdrawn'], true)) {
+            throw new ApiException(409, 'Screening results cannot be changed after the application has a final status.');
+        }
+        $existingQuery = $pdo->prepare(
+            'SELECT result_id, result_status, remarks FROM screening_result
+             WHERE screening_id = :screening_id AND criteria_id = :criteria_id FOR UPDATE',
+        );
+        $existingQuery->execute(['screening_id' => $screeningId, 'criteria_id' => $criteriaId]);
+        $existing = $existingQuery->fetch();
+        if (!$criterion['is_active'] && !$existing) {
+            throw new ApiException(409, 'Inactive criteria cannot be added to a new evaluation.');
+        }
+        $pdo->prepare(
+            'INSERT INTO screening_result
+                (screening_id, criteria_id, result_status, remarks, verified_at, evaluated_by)
+             VALUES (:screening_id, :criteria_id, :result_status, :remarks, :verified_at, :evaluated_by)
+             ON DUPLICATE KEY UPDATE
+                result_status = VALUES(result_status),
+                remarks = VALUES(remarks),
+                verified_at = VALUES(verified_at),
+                evaluated_by = VALUES(evaluated_by)',
+        )->execute([
+            'screening_id' => $screeningId,
+            'criteria_id' => $criteriaId,
+            'result_status' => $status,
+            'remarks' => $remarks !== '' ? $remarks : null,
+            'verified_at' => $verifiedAt,
+            'evaluated_by' => $user['user_id'],
+        ]);
+        $resultQuery = $pdo->prepare(
+            'SELECT result_id FROM screening_result
+             WHERE screening_id = :screening_id AND criteria_id = :criteria_id',
+        );
+        $resultQuery->execute(['screening_id' => $screeningId, 'criteria_id' => $criteriaId]);
+        $resultId = (int) $resultQuery->fetchColumn();
 
-    $insert = $pdo->prepare(
-        'INSERT INTO screening_result (screening_id, criteria_id, result_status, remarks, verified_at)
-         VALUES (:screening_id, :criteria_id, :result_status, :remarks, :verified_at)
-         ON DUPLICATE KEY UPDATE result_status = VALUES(result_status), remarks = VALUES(remarks), verified_at = VALUES(verified_at)',
-    );
-    $insert->execute([
-        'screening_id' => $screeningId,
-        'criteria_id' => $criteriaId,
-        'result_status' => $status,
-        'remarks' => $remarks !== '' ? $remarks : null,
-        'verified_at' => $verifiedAt,
-    ]);
-
-    $resultId = (int) $pdo->lastInsertId();
-    if ($resultId === 0) {
-        $existing = $pdo->prepare('SELECT result_id FROM screening_result WHERE screening_id = :screening_id AND criteria_id = :criteria_id LIMIT 1');
-        $existing->execute(['screening_id' => $screeningId, 'criteria_id' => $criteriaId]);
-        $resultId = (int) $existing->fetchColumn();
+        refreshScreeningStatus($pdo, $screeningId, $landlordId);
+        recordAudit($pdo, $user, 'screening_evaluation_saved', 'screening_result', $resultId, [
+            'application_id' => (int) $screening['application_id'],
+            'criteria_id' => $criteriaId,
+            'criteria_name' => $criterion['criteria_name'],
+            'previous_status' => $existing['result_status'] ?? null,
+            'result_status' => $status,
+            'previous_remarks' => $existing['remarks'] ?? null,
+            'remarks' => $remarks !== '' ? $remarks : null,
+        ]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $error;
     }
 
-    $statusStatement = $pdo->prepare(
-        "SELECT
-            SUM(CASE WHEN result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
-            COUNT(*) AS result_count,
-            (SELECT COUNT(*) FROM screening_criteria WHERE landlord_id = :landlord_id AND is_active = TRUE) AS active_count
-         FROM screening_result WHERE screening_id = :screening_id",
+    $row = $pdo->prepare(
+        'SELECT sr.*, CONCAT(l.first_name, " ", l.last_name) AS evaluated_by_name
+         FROM screening_result sr
+         LEFT JOIN users u ON u.user_id = sr.evaluated_by
+         LEFT JOIN landlord l ON l.user_id = u.user_id
+         WHERE sr.result_id = :result_id LIMIT 1',
     );
-    $statusStatement->execute([
-        'landlord_id' => $landlordId,
-        'screening_id' => $screeningId,
-    ]);
-    $summary = $statusStatement->fetch();
-    $screeningStatus = (int) $summary['failed_count'] > 0
-        ? 'failed'
-        : ((int) $summary['result_count'] >= (int) $summary['active_count'] ? 'passed' : 'in_progress');
-    $pdo->prepare('UPDATE screening SET screening_status = :status WHERE screening_id = :screening_id')
-        ->execute(['status' => $screeningStatus, 'screening_id' => $screeningId]);
-
-    $row = $pdo->prepare('SELECT * FROM screening_result WHERE result_id = :result_id LIMIT 1');
     $row->execute(['result_id' => $resultId]);
     return ['status' => 201, 'body' => $row->fetch()];
 }
@@ -1592,6 +2452,9 @@ function leaseCreate(PDO $pdo, array $user, array $input): array
         if ($application['application_status'] !== 'approved') {
             throw new ApiException(422, 'Only approved applications can be converted into a lease.');
         }
+        if ($application['unit_id'] !== null && (int) $application['unit_id'] !== $unitId) {
+            throw new ApiException(422, 'Lease unit must match the listing selected in the rental application.');
+        }
         $existingLease = $pdo->prepare('SELECT lease_id FROM lease WHERE application_id = :application_id LIMIT 1');
         $existingLease->execute(['application_id' => $applicationId]);
         if ($existingLease->fetchColumn()) {
@@ -2058,8 +2921,8 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
     }
 
     $method = strtolower(trim((string) ($input['payment_method'] ?? 'card')));
-    $gatewayName = 'unconfigured';
-    $gatewayReference = 'ATT-' . bin2hex(random_bytes(16));
+    $gatewayName = 'hitpay';
+    $gatewayReference = 'HP-' . bin2hex(random_bytes(16));
     if (!in_array($method, ['card', 'bank_transfer', 'e_wallet', 'cash', 'other'], true)) {
         throw new ApiException(422, 'Payment method is invalid.');
     }
@@ -2069,7 +2932,7 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
     }
     $pdo->beginTransaction();
     try {
-        $invoice = $pdo->prepare('SELECT * FROM rent_invoice WHERE invoice_id = :invoice_id FOR UPDATE');
+        $invoice = $pdo->prepare('SELECT i.*, p.property_name, u.unit_number FROM rent_invoice i JOIN lease l ON l.lease_id = i.lease_id JOIN rental_unit u ON u.unit_id = l.unit_id JOIN property p ON p.property_id = u.property_id WHERE i.invoice_id = :invoice_id FOR UPDATE');
         $invoice->execute(['invoice_id' => $invoiceId]);
         $invoiceRow = $invoice->fetch();
         if (!$invoiceRow) {
@@ -2086,6 +2949,29 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
         $outstanding = max(0, (float) $invoiceRow['total_amount'] - $alreadyPaid);
         if ($amount > $outstanding) {
             throw new ApiException(422, 'Payment amount cannot exceed the invoice balance.');
+        }
+
+        // Create HitPay payment request
+        $checkoutUrl = null;
+        $hitpayId = null;
+        try {
+            $frontendUrl = appEnv('APP_FRONTEND_URL', 'http://localhost:5175');
+            $hitpayResponse = HitPayService::createPaymentRequest([
+                'amount' => $amount,
+                'purpose' => "Invoice #{$invoiceRow['invoice_number']} - {$invoiceRow['property_name']} Unit {$invoiceRow['unit_number']}",
+                'redirect_url' => "{$frontendUrl}/tenant/payments?status=verify",
+                'email' => $user['email'] ?? '',
+                'name' => $user['name'] ?? '',
+                'reference_number' => "INV-{$invoiceId}-" . time(),
+            ]);
+            $checkoutUrl = $hitpayResponse['url'] ?? null;
+            $hitpayId = $hitpayResponse['id'] ?? null;
+            if ($hitpayId) {
+                $gatewayReference = (string) $hitpayId;
+            }
+        } catch (Throwable $hitpayErr) {
+            // Log or throw if HitPay fails
+            throw $hitpayErr;
         }
 
         $statement = $pdo->prepare(
@@ -2107,6 +2993,7 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
             'invoice_id' => $invoiceId,
             'amount' => $amount,
             'payment_method' => $method,
+            'gateway_reference' => $gatewayReference,
             'attempt_status' => 'pending',
         ]);
         $pdo->commit();
@@ -2119,7 +3006,9 @@ function paymentInitiate(PDO $pdo, array $user, array $input): array
 
     $row = $pdo->prepare('SELECT pa.*, p.payment_id, p.receipt_number, p.payment_status FROM payment_attempt pa LEFT JOIN payment p ON p.attempt_id = pa.attempt_id WHERE pa.attempt_id = :attempt_id LIMIT 1');
     $row->execute(['attempt_id' => $attemptId]);
-    return ['status' => 201, 'body' => $row->fetch()];
+    $body = $row->fetch();
+    $body['checkout_url'] = $checkoutUrl;
+    return ['status' => 201, 'body' => $body];
 }
 
 function paymentConfirm(PDO $pdo, array $user, int $attemptId, array $input): array
@@ -2162,8 +3051,8 @@ function paymentConfirm(PDO $pdo, array $user, int $attemptId, array $input): ar
         if ($attempt['attempt_status'] !== 'pending') {
             throw new ApiException(409, 'Only pending payment attempts can be confirmed.');
         }
-        if (!in_array($attempt['payment_method'], ['cash', 'bank_transfer', 'other'], true)) {
-            throw new ApiException(422, 'Card and e-wallet payments require a configured gateway verification callback.');
+        if (!in_array($attempt['payment_method'], ['card', 'e_wallet', 'cash', 'bank_transfer', 'other'], true)) {
+            throw new ApiException(422, 'Payment method not eligible for confirmation.');
         }
         $paid = $pdo->prepare(
             "SELECT COALESCE(SUM(p.amount_paid - p.refunded_amount), 0)
@@ -2352,11 +3241,120 @@ function paymentStatusGet(PDO $pdo, array $user, int $attemptId): array
     if (!invoiceBelongsToUser($pdo, (int) $payment['invoice_id'], $user)) {
         throw new ApiException(403, 'You do not have access to this payment.');
     }
+
+    // Auto-verify with HitPay if attempt is still pending and gateway is hitpay
+    if ($payment['attempt_status'] === 'pending' && $payment['gateway_name'] === 'hitpay' && !empty($payment['gateway_reference'])) {
+        try {
+            $hpStatus = HitPayService::getPaymentRequestStatus($payment['gateway_reference']);
+            if (($hpStatus['status'] ?? '') === 'completed') {
+                // Confirm payment internally
+                paymentConfirmInternal($pdo, (int) $payment['attempt_id'], $payment['gateway_reference']);
+                // Reload payment
+                $statement->execute(['attempt_id' => $attemptId]);
+                $payment = $statement->fetch();
+            } elseif (in_array(($hpStatus['status'] ?? ''), ['failed', 'canceled', 'expired'], true)) {
+                $pdo->prepare("UPDATE payment_attempt SET attempt_status = 'failed', completed_at = NOW() WHERE attempt_id = :id")
+                    ->execute(['id' => $payment['attempt_id']]);
+                $payment['attempt_status'] = 'failed';
+            }
+        } catch (Throwable) {
+            // Log silently and return current record
+        }
+    }
+
     if ($payment['payment_id'] !== null) {
         $payment['refunds'] = paymentRefundHistory($pdo, (int) $payment['payment_id']);
     }
 
     return ['status' => 200, 'body' => $payment];
+}
+
+function paymentWebhookHitPay(PDO $pdo): array
+{
+    $postData = $_POST;
+    if (empty($postData)) {
+        $postData = requestJsonOrEmpty();
+    }
+
+    $paymentRequestId = $postData['payment_request_id'] ?? $postData['id'] ?? null;
+    $status = $postData['status'] ?? null;
+    $reference = $postData['reference_number'] ?? $paymentRequestId ?? '';
+
+    if (!$paymentRequestId) {
+        return ['status' => 400, 'body' => ['error' => 'Missing payment_request_id']];
+    }
+
+    $stmt = $pdo->prepare('SELECT attempt_id, attempt_status FROM payment_attempt WHERE gateway_reference = :ref LIMIT 1');
+    $stmt->execute(['ref' => (string) $paymentRequestId]);
+    $attempt = $stmt->fetch();
+
+    if ($attempt) {
+        if ($status === 'completed' && $attempt['attempt_status'] === 'pending') {
+            paymentConfirmInternal($pdo, (int) $attempt['attempt_id'], (string) $reference);
+        } elseif (in_array($status, ['failed', 'canceled', 'expired'], true)) {
+            $pdo->prepare("UPDATE payment_attempt SET attempt_status = 'failed', completed_at = NOW() WHERE attempt_id = :id")
+                ->execute(['id' => $attempt['attempt_id']]);
+        }
+    }
+
+    return ['status' => 200, 'body' => ['received' => true]];
+}
+
+function paymentConfirmInternal(PDO $pdo, int $attemptId, string $reference): void
+{
+    $pdo->beginTransaction();
+    try {
+        $invoiceLock = $pdo->prepare(
+            'SELECT pa.*, i.total_amount, i.invoice_id
+             FROM payment_attempt pa
+             JOIN rent_invoice i ON i.invoice_id = pa.invoice_id
+             WHERE pa.attempt_id = :attempt_id FOR UPDATE',
+        );
+        $invoiceLock->execute(['attempt_id' => $attemptId]);
+        $attempt = $invoiceLock->fetch();
+        if (!$attempt || $attempt['attempt_status'] === 'successful') {
+            $pdo->commit();
+            return;
+        }
+
+        $paid = $pdo->prepare(
+            "SELECT COALESCE(SUM(p.amount_paid - p.refunded_amount), 0)
+             FROM payment p JOIN payment_attempt pa ON pa.attempt_id = p.attempt_id
+             WHERE pa.invoice_id = :invoice_id AND p.payment_status <> 'reversed'",
+        );
+        $paid->execute(['invoice_id' => $attempt['invoice_id']]);
+        $alreadyPaid = (float) $paid->fetchColumn();
+        $amount = (float) $attempt['amount'];
+        $receiptNumber = 'RCPT-' . gmdate('Ymd') . '-' . strtoupper(bin2hex(random_bytes(5)));
+
+        $pdo->prepare(
+            "UPDATE payment_attempt SET attempt_status = 'successful', completed_at = NOW()
+             WHERE attempt_id = :attempt_id",
+        )->execute(['attempt_id' => $attemptId]);
+
+        $pdo->prepare(
+            'INSERT INTO payment (attempt_id, amount_paid, refunded_amount, transaction_reference, receipt_number, payment_status, payment_date)
+             VALUES (:attempt_id, :amount_paid, 0, :transaction_reference, :receipt_number, :payment_status, NOW())',
+        )->execute([
+            'attempt_id' => $attemptId,
+            'amount_paid' => number_format($amount, 2, '.', ''),
+            'transaction_reference' => $reference,
+            'receipt_number' => $receiptNumber,
+            'payment_status' => 'completed',
+        ]);
+
+        $newPaid = $alreadyPaid + $amount;
+        $newStatus = $newPaid >= (float) $attempt['total_amount'] ? 'paid' : 'partially_paid';
+        $pdo->prepare('UPDATE rent_invoice SET invoice_status = :status WHERE invoice_id = :invoice_id')
+            ->execute(['status' => $newStatus, 'invoice_id' => $attempt['invoice_id']]);
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
 }
 
 function paymentRefundHistory(PDO $pdo, int $paymentId): array

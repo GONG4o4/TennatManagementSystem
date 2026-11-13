@@ -21,7 +21,27 @@ const emptyWorkspace = () => ({
   tenantInvoices: [],
   paymentAttempts: [],
   paymentHistory: [],
-  profile: { name: '', email: '', phone: '', property: '', unit: '', leaseStatus: '', rent: '', dueDate: '', balance: '' },
+  profile: {
+    firstName: '',
+    middleName: '',
+    lastName: '',
+    name: '',
+    email: '',
+    phone: '',
+    birthdate: '',
+    currentAddress: '',
+    emergencyContactName: '',
+    emergencyContactPhone: '',
+    employmentStatus: '',
+    monthlyIncome: '',
+    documents: [],
+    property: '',
+    unit: '',
+    leaseStatus: '',
+    rent: '',
+    dueDate: '',
+    balance: '',
+  },
   landlordProfile: { name: '', email: '', phone: '', businessName: '' },
   applicationsForTenant: [],
   auditLog: [],
@@ -63,6 +83,8 @@ function mapWorkspace(role, payload) {
     name: item.tenant_name || profile.name || '',
     date: dateOnly(item.application_date),
     status: titleCase(item.application_status),
+    propertyName: item.property_name || '',
+    unitNumber: item.unit_number || '',
     desiredMoveInDate: dateOnly(item.desired_move_in_date),
     employmentStatus: item.employment_status || '',
     monthlyIncome: Number(item.monthly_income || 0),
@@ -152,7 +174,8 @@ function mapWorkspace(role, payload) {
     name: item.criteria_name,
     active: Boolean(Number(item.is_active)),
     enabled: Boolean(Number(item.is_active)),
-    score: 0,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
   }));
   const screenings = (payload.screenings || []).map((item) => ({
     ...item,
@@ -162,8 +185,11 @@ function mapWorkspace(role, payload) {
     applicantName: item.tenant_name,
     criterionName: item.criteria_name,
     result: item.result_status,
+    criterionActive: Boolean(Number(item.criteria_is_active)),
     screeningStatus: item.screening_status,
     date: item.screening_date,
+    evaluatedAt: item.verified_at,
+    evaluatedBy: item.evaluated_by,
   }));
 
   return {
@@ -192,11 +218,19 @@ function mapWorkspace(role, payload) {
     profile: {
       ...emptyWorkspace().profile,
       ...profile,
-      name: profile.name || [profile.first_name, profile.last_name].filter(Boolean).join(' '),
-      email: profile.email || '',
+      firstName: profile.first_name || '',
+      middleName: profile.middle_name || '',
+      lastName: profile.last_name || '',
+      birthdate: dateOnly(profile.birthdate),
+      phone: profile.phone || '',
       currentAddress: profile.current_address || '',
       emergencyContactName: profile.emergency_contact_name || '',
       emergencyContactPhone: profile.emergency_contact_phone || '',
+      employmentStatus: profile.employment_status || '',
+      monthlyIncome: profile.monthly_income !== null && profile.monthly_income !== undefined ? profile.monthly_income : '',
+      documents: profile.documents || [],
+      name: profile.name || [profile.first_name, profile.last_name].filter(Boolean).join(' '),
+      email: profile.email || '',
       rent: leases[0] ? `$${leases[0].rent.toLocaleString()}` : '',
       property: leases[0]?.property || '',
       unit: leases[0]?.unit || '',
@@ -275,8 +309,6 @@ export function WorkspaceProvider({ children }) {
             properties: api.get('/properties'),
             rentalRegulations: api.get('/rental-regulations'),
             units: api.get('/units'),
-            criteria: api.get('/screening-criteria'),
-            screenings: api.get('/screenings'),
             expenses: api.get('/expenses'),
             audit: api.get('/audit-log'),
           });
@@ -325,4 +357,42 @@ export function useWorkspace() {
 
 export function makeId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function getMissingTenantInfo(profile = {}) {
+  const missing = [];
+
+  const phone = profile.phone || '';
+  if (!String(phone).trim()) {
+    missing.push({ id: 'phone', label: 'Phone number' });
+  }
+
+  const address = profile.currentAddress || profile.current_address || '';
+  if (!String(address).trim()) {
+    missing.push({ id: 'address', label: 'Current address' });
+  }
+
+  const birthdate = profile.birthdate || '';
+  if (!birthdate) {
+    missing.push({ id: 'birthdate', label: 'Birthdate' });
+  }
+
+  const emName = profile.emergencyContactName || profile.emergency_contact_name || '';
+  const emPhone = profile.emergencyContactPhone || profile.emergency_contact_phone || '';
+  if (!String(emName).trim() || !String(emPhone).trim()) {
+    missing.push({ id: 'emergency', label: 'Emergency contact details (name and phone)' });
+  }
+
+  const docs = profile.documents || [];
+  const hasGovId = docs.some((doc) => doc.document_type === 'government_id');
+  const hasProofOfIncome = docs.some((doc) => doc.document_type === 'proof_of_income');
+
+  if (!hasGovId) {
+    missing.push({ id: 'government_id', label: 'Government-issued photo ID' });
+  }
+  if (!hasProofOfIncome) {
+    missing.push({ id: 'proof_of_income', label: 'Proof of income' });
+  }
+
+  return missing;
 }

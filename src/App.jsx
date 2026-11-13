@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   AlertTriangle,
+  ArrowRight,
   Bell,
   Building2,
   CalendarDays,
+  Check,
   CheckCircle2,
   ChevronRight,
   ClipboardList,
   CreditCard,
+  Download,
   FileText,
   FolderKanban,
   HandCoins,
@@ -15,11 +19,15 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Pencil,
   Plus,
   ReceiptText,
   Search,
   Settings,
   ShieldAlert,
+  Trash2,
+  Upload,
+  User,
   Users,
   Wrench,
   X,
@@ -34,14 +42,64 @@ import {
   useSearchParams,
 } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
-import { makeId, useWorkspace } from './context/WorkspaceContext';
+import { getMissingTenantInfo, makeId, useWorkspace } from './context/WorkspaceContext';
 import api from './services/apiClient';
 import { changePassword } from './services/authService';
+import PublicLandingPage from './PublicLandingPage';
+import { usePagination } from './Pagination';
+import { PHILIPPINES_LOCATIONS, DEFAULT_COUNTRY } from './data/philippineLocations';
+import PhilippineAddressFields from './components/PhilippineAddressFields';
+
+export function parseAddress(addressString = '') {
+  if (!addressString || typeof addressString !== 'string') {
+    return { street: '', barangay: '', city: '', zipCode: '', country: DEFAULT_COUNTRY };
+  }
+  // Try JSON first
+  const trimmed = addressString.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return {
+        street: parsed.street || '',
+        barangay: parsed.barangay || '',
+        city: parsed.city || '',
+        zipCode: parsed.zipCode || parsed.zip_code || '',
+        country: parsed.country || DEFAULT_COUNTRY,
+      };
+    } catch {
+      // fallback to comma separated
+    }
+  }
+  // Comma separated fallback
+  const parts = trimmed.split(',').map((p) => p.trim());
+  if (parts.length >= 4) {
+    const rawBrgy = parts[parts.length - 4] || '';
+    const cleanBrgy = rawBrgy.replace(/^brgy\.?\s*/i, '');
+    return {
+      street: parts.slice(0, parts.length - 4).join(', ') || parts[0],
+      barangay: cleanBrgy,
+      city: parts[parts.length - 3] || '',
+      zipCode: parts[parts.length - 2] || '',
+      country: parts[parts.length - 1] || DEFAULT_COUNTRY,
+    };
+  }
+  return { street: trimmed, barangay: '', city: '', zipCode: '', country: DEFAULT_COUNTRY };
+}
+
+export function formatAddress({ street, barangay, city, zipCode, country }) {
+  const parts = [
+    street?.trim(),
+    barangay?.trim() ? `Brgy. ${barangay.trim().replace(/^brgy\.?\s*/i, '')}` : '',
+    city?.trim(),
+    zipCode?.trim(),
+    country?.trim() || DEFAULT_COUNTRY,
+  ].filter(Boolean);
+  return parts.join(', ');
+}
 
 const statusClasses = {
   'Approved': 'border-emerald-200 bg-emerald-50 text-emerald-700',
   'Under Review': 'border-amber-200 bg-amber-50 text-amber-700',
-  'Screening': 'border-sky-200 bg-sky-50 text-sky-700',
   'Rejected': 'border-rose-200 bg-rose-50 text-rose-700',
   'Successful': 'border-emerald-200 bg-emerald-50 text-emerald-700',
   'Pending': 'border-amber-200 bg-amber-50 text-amber-700',
@@ -50,10 +108,10 @@ const statusClasses = {
   'Pending Lease': 'border-amber-200 bg-amber-50 text-amber-700',
   'Ended': 'border-slate-200 bg-slate-100 text-slate-700',
   'Available': 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  'Occupied': 'border-sky-200 bg-sky-50 text-sky-700',
+  'Occupied': 'border-purple-200 bg-purple-50 text-purple-700',
   'Maintenance': 'border-amber-200 bg-amber-50 text-amber-700',
   'Awaiting Review': 'border-amber-200 bg-amber-50 text-amber-700',
-  'In Progress': 'border-sky-200 bg-sky-50 text-sky-700',
+  'In Progress': 'border-purple-200 bg-purple-50 text-purple-700',
   'Scheduled': 'border-violet-200 bg-violet-50 text-violet-700',
   'High': 'border-rose-200 bg-rose-50 text-rose-700',
   'Medium': 'border-amber-200 bg-amber-50 text-amber-700',
@@ -61,7 +119,7 @@ const statusClasses = {
   'Unpaid': 'border-amber-200 bg-amber-50 text-amber-700',
   'Paid': 'border-emerald-200 bg-emerald-50 text-emerald-700',
   'Partial': 'border-violet-200 bg-violet-50 text-violet-700',
-  'Submitted': 'border-sky-200 bg-sky-50 text-sky-700',
+  'Submitted': 'border-purple-200 bg-purple-50 text-purple-700',
   'Acknowledge': 'border-violet-200 bg-violet-50 text-violet-700',
   'Completed': 'border-emerald-200 bg-emerald-50 text-emerald-700',
   'Cancelled': 'border-rose-200 bg-rose-50 text-rose-700',
@@ -70,6 +128,8 @@ const statusClasses = {
   'Overdue': 'border-rose-200 bg-rose-50 text-rose-700',
   'Void': 'border-slate-200 bg-slate-100 text-slate-600',
   'Not applicable': 'border-slate-200 bg-slate-100 text-slate-700',
+  'Not Applicable': 'border-slate-200 bg-slate-100 text-slate-700',
+  'In progress': 'border-purple-200 bg-purple-50 text-purple-700',
 };
 
 function monthlyDueDate(periodDate, dueDay) {
@@ -85,6 +145,7 @@ function App() {
   return (
     <Routes>
       <Route path="/" element={<RootRedirect user={user} />} />
+      <Route path="/explore" element={<PublicLandingPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/unauthorized" element={<UnauthorizedPage />} />
@@ -102,7 +163,6 @@ function App() {
         <Route path="properties" element={<PropertiesPage />} />
         <Route path="units" element={<RentalUnitsPage />} />
         <Route path="applications" element={<ApplicationsPage />} />
-        <Route path="screening" element={<ScreeningPage />} />
         <Route path="leases" element={<LeasesPage />} />
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="expenses" element={<ExpensesPage />} />
@@ -129,7 +189,8 @@ function App() {
         <Route path="payments" element={<TenantPaymentsPage />} />
         <Route path="maintenance" element={<TenantMaintenancePage />} />
         <Route path="notifications" element={<TenantNotificationsPage />} />
-        <Route path="settings" element={<TenantSettingsPage />} />
+        <Route path="profile" element={<TenantProfilePage />} />
+        <Route path="settings" element={<TenantProfilePage />} />
       </Route>
 
       <Route
@@ -143,6 +204,7 @@ function App() {
         <Route index element={<TenantApplicationsPage />} />
         <Route path="applications" element={<TenantApplicationsPage />} />
         <Route path="rentals" element={<TenantRentalsPage />} />
+        <Route path="profile" element={<TenantProfilePage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -152,7 +214,7 @@ function App() {
 
 function RootRedirect({ user }) {
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <PublicLandingPage />;
   }
 
   const destination = user.role === 'landlord' ? '/landlord'
@@ -182,8 +244,8 @@ function ProtectedRoute({ children, role }) {
 function LoadingScreen() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50">
-      <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-slate-700 shadow-soft">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+      <div className="flex items-center gap-3 rounded-2xl border border-purple-200 bg-white px-5 py-3 text-slate-700 shadow-soft">
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-purple-600 border-t-transparent" />
         Loading dashboard...
       </div>
     </div>
@@ -192,7 +254,9 @@ function LoadingScreen() {
 
 function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { login } = useAuth();
+  const unitId = searchParams.get('unitId');
   const [form, setForm] = useState({
     email: '',
     password: '',
@@ -210,6 +274,11 @@ function LoginPage() {
 
     try {
       const user = await login({ ...form });
+      if (unitId && ['applicant', 'tenant'].includes(user.role)) {
+        await api.post('/applications', { unit_id: Number(unitId) });
+        navigate(user.role === 'tenant' ? '/tenant/applications' : '/applicant/applications');
+        return;
+      }
       navigate(user?.role === 'landlord' ? '/landlord' : user?.role === 'applicant' ? '/applicant' : '/tenant');
     } catch (err) {
       setError(err.message || 'Authentication failed.');
@@ -219,18 +288,18 @@ function LoginPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10">
       <div className="grid w-full max-w-5xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-soft lg:grid-cols-2">
-        <div className="bg-gradient-to-br from-emerald-700 via-emerald-600 to-emerald-500 p-8 text-white">
+        <div className="bg-gradient-to-br from-purple-800 via-purple-700 to-purple-600 p-8 text-white">
           <div className="mb-8 flex items-center gap-3">
             <div className="rounded-xl bg-white/10 p-2.5"><Building2 className="h-6 w-6" /></div>
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-emerald-100">Portfolio</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-purple-200">Portfolio</p>
               <h1 className="text-2xl font-bold">TenantFlow</h1>
             </div>
           </div>
 
           <div className="space-y-6">
             <div>
-              <p className="text-sm uppercase tracking-[0.2em] text-emerald-100">Property operations</p>
+              <p className="text-sm uppercase tracking-[0.2em] text-purple-200">Property operations</p>
               <h2 className="mt-3 text-4xl font-semibold leading-tight">Smarter rent, lease, and maintenance workflows.</h2>
             </div>
 
@@ -241,8 +310,8 @@ function LoginPage() {
                 'Maintenance and leasing lifecycle tracking',
               ].map((item) => (
                 <div key={item} className="flex items-center gap-3 rounded-xl bg-white/10 p-3 backdrop-blur-sm">
-                  <CheckCircle2 className="h-5 w-5 text-emerald-100" />
-                  <span className="text-sm text-emerald-50">{item}</span>
+                  <CheckCircle2 className="h-5 w-5 text-purple-200" />
+                  <span className="text-sm text-purple-50">{item}</span>
                 </div>
               ))}
             </div>
@@ -251,7 +320,7 @@ function LoginPage() {
 
         <div className="p-8 sm:p-10">
           <div className="mb-6">
-            <p className="text-sm font-medium uppercase tracking-[0.2em] text-emerald-600">Welcome back</p>
+            <p className="text-sm font-medium uppercase tracking-[0.2em] text-purple-600">Welcome back</p>
             <h3 className="mt-2 text-3xl font-bold text-slate-900">Sign in</h3>
           </div>
 
@@ -292,7 +361,7 @@ function LoginPage() {
 
             <div className="text-center text-sm text-slate-600">
               Don’t have an account?{' '}
-              <button type="button" onClick={() => navigate('/register')} className="font-semibold text-emerald-700 underline-offset-2 hover:underline">
+              <button type="button" onClick={() => navigate(`/register${unitId ? `?unitId=${encodeURIComponent(unitId)}` : ''}`)} className="font-semibold text-purple-700 underline-offset-2 hover:underline">
                 Create account
               </button>
             </div>
@@ -305,77 +374,148 @@ function LoginPage() {
 
 function RegisterPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { register } = useAuth();
-  const [state, setState] = useState({ name: '', email: '', password: '' });
+  const unitId = searchParams.get('unitId');
+  const [state, setState] = useState({
+    first_name: '',
+    middle_name: '',
+    last_name: '',
+    birthdate: '',
+    phone: '',
+    country: 'Philippines',
+    city: '',
+    barangay: '',
+    zip_code: '',
+    street: '',
+    emergency_contact_name: '',
+    emergency_contact_phone: '',
+    employment_status: 'full_time',
+    monthly_income: '',
+    email: '',
+    password: '',
+  });
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError('');
+    setSubmitting(true);
     try {
-      const user = await register(state);
-      navigate(user.role === 'landlord' ? '/landlord' : user.role === 'applicant' ? '/applicant' : '/tenant');
+      const formData = new FormData(event.currentTarget);
+      const combinedAddress = formatAddress({
+        street: state.street,
+        barangay: state.barangay,
+        city: state.city,
+        zipCode: state.zip_code,
+        country: state.country,
+      });
+      formData.set('current_address', combinedAddress);
+      await register(formData);
+      if (unitId) {
+        navigate(`/applicant/profile?unitId=${encodeURIComponent(unitId)}&justRegistered=1`);
+      } else {
+        navigate('/applicant/profile');
+      }
     } catch (registerError) {
       setError(registerError.message || 'Account registration failed.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
+  const updateField = (event) => {
+    const { name, value } = event.target;
+    setState((previous) => ({ ...previous, [name]: value }));
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10">
-      <div className="w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-8 shadow-soft">
-        <div className="mb-6">
-          <p className="text-sm font-medium uppercase tracking-[0.2em] text-emerald-600">Create account</p>
-          <h3 className="mt-2 text-3xl font-bold text-slate-900">Register</h3>
+    <div className="min-h-screen bg-slate-50 px-4 py-8 sm:py-12">
+      <div className="mx-auto w-full max-w-3xl rounded-3xl border border-slate-200 bg-white p-6 shadow-soft sm:p-10">
+        <button type="button" onClick={() => navigate('/explore')} className="mb-7 flex items-center gap-2 text-sm font-semibold text-slate-600 hover:text-rose-600">
+          <Building2 className="h-5 w-5" /> TenantFlow
+        </button>
+        <div className="mb-7">
+          <p className="text-sm font-medium uppercase tracking-[0.2em] text-rose-600">Renter account</p>
+          <h3 className="mt-2 text-3xl font-bold text-slate-900">Create your account</h3>
+          <p className="mt-2 text-sm text-slate-600">Create your renter account to explore properties and send applications.</p>
+          {unitId && (
+            <div className="mt-4 flex items-center gap-2.5 rounded-2xl border border-rose-200 bg-rose-50/80 p-3.5 text-xs text-rose-900">
+              <Building2 className="h-4 w-4 shrink-0 text-rose-600" />
+              <span>Applying for a home: Once registered, you will be redirected to your profile to upload documents and complete your tenant info before sending your application.</span>
+            </div>
+          )}
         </div>
 
-        <form className="space-y-5" onSubmit={handleSubmit}>
-          <div>
-            <label htmlFor="register-name" className="label">Full name</label>
-            <input
-              id="register-name"
-              required
-              value={state.name}
-              onChange={(event) => setState((prev) => ({ ...prev, name: event.target.value }))}
-              className="field"
-              placeholder="Jordan Smith"
-            />
-          </div>
+        <form className="space-y-7" onSubmit={handleSubmit}>
+          <section>
+            <h4 className="mb-4 text-lg font-semibold">Account access</h4>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div><label htmlFor="register-email" className="label">Email <span className="text-rose-600">*</span></label><input id="register-email" name="email" type="email" required maxLength={255} value={state.email} onChange={updateField} className="field" autoComplete="email" /></div>
+              <div><label htmlFor="register-password" className="label">Password <span className="text-rose-600">*</span></label><input id="register-password" name="password" type="password" minLength={8} maxLength={4096} required value={state.password} onChange={updateField} className="field" autoComplete="new-password" /></div>
+            </div>
+          </section>
 
-          <div>
-            <label htmlFor="register-email" className="label">Email</label>
-            <input
-              id="register-email"
-              type="email"
-              required
-              value={state.email}
-              onChange={(event) => setState((prev) => ({ ...prev, email: event.target.value }))}
-              className="field"
-              placeholder="name@example.com"
-            />
-          </div>
+          <section>
+            <h4 className="mb-4 text-lg font-semibold">Personal information</h4>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div><label htmlFor="register-first-name" className="label">First name <span className="text-rose-600">*</span></label><input id="register-first-name" name="first_name" required maxLength={100} value={state.first_name} onChange={updateField} className="field" autoComplete="given-name" /></div>
+              <div><label htmlFor="register-middle-name" className="label">Middle name <span className="font-normal text-slate-400">(optional)</span></label><input id="register-middle-name" name="middle_name" maxLength={100} value={state.middle_name} onChange={updateField} className="field" autoComplete="additional-name" /></div>
+              <div><label htmlFor="register-last-name" className="label">Last name <span className="text-rose-600">*</span></label><input id="register-last-name" name="last_name" required maxLength={100} value={state.last_name} onChange={updateField} className="field" autoComplete="family-name" /></div>
+            </div>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div><label htmlFor="register-birthdate" className="label">Birthdate <span className="font-normal text-slate-400">(optional)</span></label><input id="register-birthdate" name="birthdate" type="date" max={new Date().toISOString().slice(0, 10)} value={state.birthdate} onChange={updateField} className="field" /></div>
+              <div><label htmlFor="register-phone" className="label">Phone number <span className="font-normal text-slate-400">(optional)</span></label><input id="register-phone" name="phone" type="tel" maxLength={30} value={state.phone} onChange={updateField} className="field" autoComplete="tel" /></div>
+              <div className="sm:col-span-2">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-purple-700">Current address <span className="font-normal text-slate-400">(optional)</span></p>
+                <PhilippineAddressFields
+                  idPrefix="register-addr"
+                  required={false}
+                  values={{
+                    street: state.street,
+                    barangay: state.barangay,
+                    city: state.city,
+                    zip_code: state.zip_code,
+                    zipCode: state.zip_code,
+                    country: state.country,
+                  }}
+                  onChange={(updated) => {
+                    setState((prev) => ({
+                      ...prev,
+                      street: updated.street ?? prev.street,
+                      barangay: updated.barangay ?? prev.barangay,
+                      city: updated.city ?? prev.city,
+                      zip_code: updated.zipCode || updated.zip_code || prev.zip_code,
+                      country: updated.country ?? prev.country,
+                    }));
+                  }}
+                />
+              </div>
+            </div>
+          </section>
 
-          <div>
-            <label htmlFor="register-password" className="label">Password</label>
-            <input
-              id="register-password"
-              type="password"
-              minLength={8}
-              required
-              value={state.password}
-              onChange={(event) => setState((prev) => ({ ...prev, password: event.target.value }))}
-              className="field"
-              placeholder="Create a secure password"
-            />
-          </div>
+          <section>
+            <h4 className="mb-4 text-lg font-semibold">Emergency contact <span className="text-xs font-normal text-slate-400">(optional)</span></h4>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div><label htmlFor="register-emergency-name" className="label">Contact name</label><input id="register-emergency-name" name="emergency_contact_name" maxLength={150} value={state.emergency_contact_name} onChange={updateField} className="field" /></div>
+              <div><label htmlFor="register-emergency-phone" className="label">Contact phone</label><input id="register-emergency-phone" name="emergency_contact_phone" type="tel" maxLength={30} value={state.emergency_contact_phone} onChange={updateField} className="field" /></div>
+            </div>
+          </section>
 
           {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
-          <button type="submit" className="primary-btn w-full">Create account</button>
+
+          <button type="submit" disabled={submitting} className="primary-btn w-full">
+            {submitting ? 'Creating account…' : 'Create account'}
+          </button>
+
           <div className="text-center text-sm text-slate-600">
             Already registered?{' '}
-            <button type="button" onClick={() => navigate('/login')} className="font-semibold text-emerald-700 underline-offset-2 hover:underline">
+            <button type="button" onClick={() => navigate(`/login${unitId ? `?unitId=${encodeURIComponent(unitId)}` : ''}`)} className="font-semibold text-purple-700 underline-offset-2 hover:underline">
               Sign in
             </button>
           </div>
+          <p className="text-center text-xs text-slate-500">Already have an account? <button type="button" onClick={() => navigate('/explore')} className="font-semibold text-rose-600 hover:underline">Browse available homes</button></p>
         </form>
       </div>
     </div>
@@ -412,7 +552,6 @@ function LandlordLayout() {
     { label: 'Properties', to: '/landlord/properties', icon: Building2 },
     { label: 'Rental Units', to: '/landlord/units', icon: Home },
     { label: 'Applications', to: '/landlord/applications', icon: Users },
-    { label: 'Screening', to: '/landlord/screening', icon: FileText },
     { label: 'Leases', to: '/landlord/leases', icon: CalendarDays },
     { label: 'Invoices', to: '/landlord/invoices', icon: ReceiptText },
     { label: 'Expenses', to: '/landlord/expenses', icon: HandCoins },
@@ -440,11 +579,11 @@ function LandlordLayout() {
   const accountName = user?.name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.email || 'Landlord';
 
   return (
-    <div className="flex min-h-screen bg-slate-100">
-      <aside className={`${isCollapsed ? 'w-24' : 'w-72'} hidden border-r border-slate-200 bg-white lg:flex lg:flex-col`}>
+    <div className="flex min-h-screen bg-purple-50/30">
+      <aside className={`${isCollapsed ? 'w-24' : 'w-72'} hidden border-r border-purple-100 bg-white lg:flex lg:flex-col`}>
         <div className="flex items-center justify-between border-b border-slate-200 p-4">
           <div className="flex items-center gap-3 overflow-hidden">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white">TF</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-700 text-sm font-bold text-white">TF</div>
             {!isCollapsed && <div><p className="text-xs uppercase tracking-[0.2em] text-slate-400">Portfolio</p><p className="text-lg font-bold text-slate-900">TenantFlow</p></div>}
           </div>
           <button className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-50" onClick={() => setIsCollapsed((prev) => !prev)}>
@@ -457,7 +596,7 @@ function LandlordLayout() {
             <NavLink
               key={label}
               to={to}
-              className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}
+              className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}
             >
               <Icon className="h-4 w-4" />
               {!isCollapsed && <span>{label}</span>}
@@ -480,14 +619,14 @@ function LandlordLayout() {
       <div className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-200 bg-white transition lg:hidden`}>
         <div className="flex items-center justify-between border-b border-slate-200 p-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white">TF</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-700 text-sm font-bold text-white">TF</div>
             <div><p className="text-xs uppercase tracking-[0.2em] text-slate-400">Portfolio</p><p className="text-lg font-bold text-slate-900">TenantFlow</p></div>
           </div>
           <button onClick={() => setMobileOpen(false)} className="rounded-lg border border-slate-200 p-1.5 text-slate-600"><X className="h-4 w-4" /></button>
         </div>
         <nav className="space-y-1 p-3">
           {navItems.map(({ label, to, icon: Icon }) => (
-            <NavLink key={label} to={to} onClick={() => setMobileOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <NavLink key={label} to={to} onClick={() => setMobileOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}>
               <Icon className="h-4 w-4" /> {label}
             </NavLink>
           ))}
@@ -509,11 +648,11 @@ function LandlordLayout() {
           <div className="flex items-center gap-3">
             <div className="relative hidden md:block">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input value={headerSearch} onChange={(event) => setHeaderSearch(event.target.value)} onKeyDown={submitSearch} className="w-64 rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm outline-none focus:border-emerald-500" placeholder="Search and press Enter" />
+              <input value={headerSearch} onChange={(event) => setHeaderSearch(event.target.value)} onKeyDown={submitSearch} className="w-64 rounded-xl border border-purple-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-purple-500" placeholder="Search and press Enter" />
             </div>
             <button onClick={() => navigate('/landlord/notifications')} aria-label={`${data.notifications.filter((item) => !item.read).length} unread notifications`} className="relative rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><Bell className="h-4 w-4" />{data.notifications.some((item) => !item.read) && <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-rose-500" />}</button>
             <button onClick={() => navigate('/landlord/settings')} className="flex items-center gap-3 rounded-xl border border-slate-200 px-2.5 py-1.5 text-left">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">{shortInitials(accountName)}</div>
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-purple-700">{shortInitials(accountName)}</div>
               <div className="hidden text-left sm:block">
                 <div className="text-sm font-semibold text-slate-900">{accountName}</div>
                 <div className="text-xs text-slate-500">Landlord</div>
@@ -539,6 +678,8 @@ function ApplicantLayout() {
   const navItems = [
     { label: 'Applications', to: '/applicant/applications', icon: FolderKanban },
     { label: 'Available rentals', to: '/applicant/rentals', icon: Building2 },
+    { label: 'Explore listings', to: '/explore', icon: Search },
+    { label: 'Profile', to: '/applicant/profile', icon: User },
   ];
 
   const handleLogout = () => {
@@ -547,7 +688,7 @@ function ApplicantLayout() {
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-100">
+    <div className="flex min-h-screen bg-purple-50/30">
       <aside className="hidden w-72 border-r border-slate-200 bg-white lg:flex lg:flex-col">
         <div className="border-b border-slate-200 p-4">
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Rental portal</p>
@@ -555,7 +696,7 @@ function ApplicantLayout() {
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {navItems.map(({ label, to, icon: Icon }) => (
-            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}>
               <Icon className="h-4 w-4" /> {label}
             </NavLink>
           ))}
@@ -579,7 +720,7 @@ function ApplicantLayout() {
         </header>
         <nav className="flex gap-2 border-b border-slate-200 bg-white p-3 lg:hidden">
           {navItems.map(({ label, to, icon: Icon }) => (
-            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}>
               <Icon className="h-4 w-4" /> {label}
             </NavLink>
           ))}
@@ -603,13 +744,14 @@ function TenantLayout() {
   const navItems = [
     { label: 'Dashboard', to: '/tenant/dashboard', icon: LayoutDashboard },
     { label: 'Available rentals', to: '/tenant/rentals', icon: Building2 },
+    { label: 'Explore listings', to: '/explore', icon: Search },
     { label: 'Applications', to: '/tenant/applications', icon: FolderKanban },
     { label: 'My Lease', to: '/tenant/lease', icon: Home },
     { label: 'Invoices', to: '/tenant/invoices', icon: ReceiptText },
     { label: 'Payments', to: '/tenant/payments', icon: CreditCard },
     { label: 'Maintenance', to: '/tenant/maintenance', icon: Wrench },
     { label: 'Notifications', to: '/tenant/notifications', icon: Bell },
-    { label: 'Settings', to: '/tenant/settings', icon: Settings },
+    { label: 'Profile', to: '/tenant/profile', icon: User },
   ];
 
   const handleLogout = () => {
@@ -618,11 +760,11 @@ function TenantLayout() {
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-100">
-      <aside className="w-72 border-r border-slate-200 bg-white lg:flex lg:flex-col">
+    <div className="flex min-h-screen bg-purple-50/30">
+      <aside className="w-72 border-r border-purple-100 bg-white lg:flex lg:flex-col">
         <div className="flex items-center justify-between border-b border-slate-200 p-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white">TF</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-700 text-sm font-bold text-white">TF</div>
             <div>
               <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Tenant portal</p>
               <p className="text-lg font-bold text-slate-900">Resident</p>
@@ -632,7 +774,7 @@ function TenantLayout() {
 
         <nav className="flex-1 space-y-1 p-3">
           {navItems.map(({ label, to, icon: Icon }) => (
-            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <NavLink key={label} to={to} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}>
               <Icon className="h-4 w-4" /> {label}
             </NavLink>
           ))}
@@ -649,14 +791,14 @@ function TenantLayout() {
       <div className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-72 border-r border-slate-200 bg-white transition lg:hidden`}>
         <div className="flex items-center justify-between border-b border-slate-200 p-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white">TF</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-700 text-sm font-bold text-white">TF</div>
             <div><p className="text-xs uppercase tracking-[0.2em] text-slate-400">Tenant portal</p><p className="text-lg font-bold text-slate-900">Resident</p></div>
           </div>
           <button onClick={() => setMobileOpen(false)} className="rounded-lg border border-slate-200 p-1.5 text-slate-600"><X className="h-4 w-4" /></button>
         </div>
         <nav className="space-y-1 p-3">
           {navItems.map(({ label, to, icon: Icon }) => (
-            <NavLink key={label} to={to} onClick={() => setMobileOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <NavLink key={label} to={to} onClick={() => setMobileOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium ${isActive ? 'bg-purple-50 text-purple-700' : 'text-slate-600 hover:bg-slate-100'}`}>
               <Icon className="h-4 w-4" /> {label}
             </NavLink>
           ))}
@@ -674,7 +816,7 @@ function TenantLayout() {
           <div className="flex items-center gap-3">
             <button onClick={() => navigate('/tenant/notifications')} aria-label={`${data.notifications.filter((item) => !item.read).length} unread notifications`} className="relative rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><Bell className="h-4 w-4" />{data.notifications.some((item) => !item.read) && <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-rose-500" />}</button>
             <button onClick={() => navigate('/tenant/settings')} className="flex items-center gap-3 rounded-xl border border-slate-200 px-2.5 py-1.5 text-left">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">{shortInitials(accountName)}</div>
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-purple-700">{shortInitials(accountName)}</div>
               <div className="text-left">
                 <div className="text-sm font-semibold text-slate-900">{accountName}</div>
                 <div className="text-xs text-slate-500">Tenant</div>
@@ -704,7 +846,7 @@ function LandlordDashboardPage() {
     { label: 'Occupied Units', value: occupiedCount, delta: data.units.length ? `${Math.round((occupiedCount / data.units.length) * 100)}% occupancy` : 'No units yet', tone: 'violet', to: '/landlord/units' },
     { label: 'Available Units', value: data.units.filter((item) => ['vacant', 'Available'].includes(item.status)).length, delta: 'Ready to lease', tone: 'amber', to: '/landlord/units' },
     { label: 'Active Leases', value: activeLeaseCount, delta: 'Current agreements', tone: 'emerald', to: '/landlord/leases' },
-    { label: 'Pending Applications', value: data.applications.filter((item) => ['Submitted', 'Under Review', 'Screening'].includes(item.status)).length, delta: 'Awaiting review', tone: 'rose', to: '/landlord/applications' },
+    { label: 'Pending Applications', value: data.applications.filter((item) => ['Submitted', 'Under Review'].includes(item.status)).length, delta: 'Awaiting review', tone: 'rose', to: '/landlord/applications' },
     { label: 'Unpaid Invoices', value: `$${unpaidTotal.toLocaleString()}`, delta: 'Outstanding total', tone: 'amber', to: '/landlord/invoices' },
     { label: 'Monthly Income', value: `$${data.leases.filter((item) => item.status === 'Active').reduce((sum, item) => sum + Number(item.rent || 0), 0).toLocaleString()}`, delta: 'Based on active leases', tone: 'sky', to: '/landlord/invoices' },
   ];
@@ -727,7 +869,7 @@ function LandlordDashboardPage() {
           <button
             key={item.label}
             type="button"
-            className="rounded-2xl text-left transition hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
+            className="rounded-2xl text-left transition hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-600 focus-visible:ring-offset-2"
             aria-label={`View ${item.label}`}
             onClick={() => navigate(item.to)}
           >
@@ -745,7 +887,7 @@ function LandlordDashboardPage() {
           <div className="flex h-56 items-end gap-3">
             {recentPayments.map((item) => (
               <div key={item.id} className="flex flex-1 flex-col items-center gap-2">
-                <div className="w-full rounded-t-2xl bg-gradient-to-t from-emerald-600 to-emerald-400" style={{ height: `${Math.min(100, (Number(item.amount || 0) / Math.max(1, ...data.paymentHistory.map((payment) => Number(payment.amount || 0)))) * 100)}%` }} />
+                <div className="w-full rounded-t-2xl bg-gradient-to-t from-purple-700 to-purple-400" style={{ height: `${Math.min(100, (Number(item.amount || 0) / Math.max(1, ...data.paymentHistory.map((payment) => Number(payment.amount || 0)))) * 100)}%` }} />
                 <span className="text-xs text-slate-500">{item.date ? new Date(item.date).toLocaleDateString(undefined, { month: 'short' }) : '—'}</span>
               </div>
             ))}
@@ -763,7 +905,7 @@ function LandlordDashboardPage() {
                   <span className="font-semibold text-slate-900">{item.value}%</span>
                 </div>
                 <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full rounded-full bg-emerald-500" style={{ width: `${item.value}%` }} />
+                  <div className="h-full rounded-full bg-purple-500" style={{ width: `${item.value}%` }} />
                 </div>
               </div>
             ))}
@@ -775,7 +917,7 @@ function LandlordDashboardPage() {
         <div className="panel p-5 xl:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-semibold text-slate-900">Recent applications</h3>
-            <button className="text-sm font-medium text-emerald-700" onClick={() => navigate('/landlord/applications')}>View all</button>
+            <button className="text-sm font-medium text-purple-700" onClick={() => navigate('/landlord/applications')}>View all</button>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-sm">
@@ -804,7 +946,7 @@ function LandlordDashboardPage() {
         <div className="panel p-5">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-semibold text-slate-900">Recent payments</h3>
-            <button className="text-sm font-medium text-emerald-700" onClick={() => navigate('/landlord/invoices')}>Review</button>
+            <button className="text-sm font-medium text-purple-700" onClick={() => navigate('/landlord/invoices')}>Review</button>
           </div>
           <div className="space-y-4">
             {recentPayments.map((payment) => (
@@ -830,7 +972,7 @@ function LandlordDashboardPage() {
       <div className="panel p-5">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-slate-900">Maintenance requests needing attention</h3>
-          <button className="text-sm font-medium text-emerald-700" onClick={() => navigate('/landlord/maintenance')}>Manage</button>
+          <button className="text-sm font-medium text-purple-700" onClick={() => navigate('/landlord/maintenance')}>Manage</button>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
           {data.maintenance.slice(0, 3).map((item) => (
@@ -864,6 +1006,7 @@ function PropertiesPage() {
   const visibleProperties = data.properties.filter((item) =>
     `${item.name} ${item.address} ${item.type}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const { pageItems: pageProperties, pagination: propertiesPagination } = usePagination(visibleProperties, query);
   const fields = [
     { name: 'name', label: 'Property name', required: true },
     { name: 'type', label: 'Property type', type: 'select', options: ['apartment', 'house', 'condo', 'townhouse', 'boarding_house', 'commercial', 'other'], required: true },
@@ -878,7 +1021,7 @@ function PropertiesPage() {
       <PageHeader title="Properties" subtitle="Manage portfolios, units, and property health across your asset base." action={<button className="primary-btn" onClick={() => { setEditing(null); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> Add property</button>} />
       <SearchFilterBar query={query} onQueryChange={setQuery} placeholder="Search properties" />
       <div className="grid gap-4 xl:grid-cols-3">
-        {visibleProperties.map((property) => (
+        {pageProperties.map((property) => (
           <div key={property.id} className="panel p-5">
             <div className="flex items-start justify-between">
               <div>
@@ -907,6 +1050,7 @@ function PropertiesPage() {
           </div>
         ))}
       </div>
+      {propertiesPagination}
       {visibleProperties.length === 0 && <EmptyState title="No properties found" description="Try another search or add your first property." />}
       <FormDialog
         open={dialogOpen}
@@ -942,6 +1086,7 @@ function RentalUnitsPage() {
   const visibleUnits = data.units.filter((item) =>
     `${item.id} ${item.unitNumber} ${item.property} ${item.propertyId}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const { pageItems: pageUnits, pagination: unitsPagination } = usePagination(visibleUnits, query);
   const fields = [
     { name: 'unitNumber', label: 'Unit number', required: true },
     { name: 'propertyId', label: 'Property', type: 'select', options: data.properties.map((item) => ({ value: item.id, label: item.name })), required: true },
@@ -961,7 +1106,7 @@ function RentalUnitsPage() {
       {!data.properties.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Create a property before adding a rental unit. <NavLink className="font-semibold underline" to="/landlord/properties">Add a property</NavLink>.</div>}
       <SearchFilterBar query={query} onQueryChange={setQuery} placeholder="Search units and properties" />
       <div className="grid gap-4 xl:grid-cols-3">
-        {visibleUnits.map((unit) => (
+        {pageUnits.map((unit) => (
           <div key={unit.id} className="panel p-5">
             <div className="flex items-start justify-between">
               <div>
@@ -1001,6 +1146,7 @@ function RentalUnitsPage() {
           </div>
         ))}
       </div>
+      {unitsPagination}
       {visibleUnits.length === 0 && <EmptyState title="No units found" description="Adjust the search or add a rental unit." />}
       <FormDialog
         open={dialogOpen}
@@ -1060,6 +1206,7 @@ function ApplicationsPage() {
     const matchesStatus = statusFilter === 'all' || item.status.toLowerCase().replaceAll(' ', '_') === statusFilter;
     return matchesQuery && matchesStatus;
   });
+  const { pageItems: pageApplications, pagination: applicationsPagination } = usePagination(applications, `${query}:${statusFilter}`);
   const changeStatus = async (application, status) => {
     try {
       await api.patch(`/applications/${application.id}/status`, { status: status.toLowerCase().replaceAll(' ', '_') });
@@ -1071,7 +1218,7 @@ function ApplicationsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Applications" subtitle="Track submissions, screenings, and application status by applicant." />
+      <PageHeader title="Applications" subtitle="Review renter details, supporting documents, and requested listings." />
       <div className="panel overflow-hidden">
         <div className="border-b border-slate-200 p-4">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1094,6 +1241,7 @@ function ApplicationsPage() {
             <thead className="bg-slate-50 text-slate-500">
               <tr>
                 <th className="px-4 py-3">Applicant</th>
+                <th className="px-4 py-3">Listing</th>
                 <th className="px-4 py-3">Date</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Reviewer</th>
@@ -1101,7 +1249,7 @@ function ApplicationsPage() {
               </tr>
             </thead>
             <tbody>
-              {applications.map((app) => (
+              {pageApplications.map((app) => (
                 <tr key={app.id} className="border-t border-slate-200">
                   <td className="px-4 py-3">
                     <div>
@@ -1109,12 +1257,13 @@ function ApplicationsPage() {
                       <p className="text-xs text-slate-500">{app.id}</p>
                     </div>
                   </td>
+                  <td className="px-4 py-3 text-slate-600">{app.propertyName ? `${app.propertyName} · Unit ${app.unitNumber || '—'}` : '—'}</td>
                   <td className="px-4 py-3 text-slate-600">{app.date}</td>
                   <td className="px-4 py-3"><StatusBadge label={app.status} /></td>
                   <td className="px-4 py-3 text-slate-600">{app.reviewedBy ? <><span>{app.reviewedBy}</span><span className="block text-xs text-slate-400">{app.reviewedAt ? new Date(app.reviewedAt).toLocaleDateString() : ''}</span></> : 'Not reviewed'}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <button className="text-sm font-medium text-emerald-700" onClick={async () => {
+                      <button className="text-sm font-medium text-purple-700" onClick={async () => {
                         try {
                           const response = await api.get(`/applications/${app.id}/documents`);
                           const documents = response.data.map((item) => ({
@@ -1129,8 +1278,8 @@ function ApplicationsPage() {
                           window.alert(error.message);
                         }
                       }}>Details</button>
-                      {['Submitted', 'Under Review'].includes(app.status) && <button className="text-sm font-medium text-sky-700" onClick={() => changeStatus(app, 'Under Review')}>Start review</button>}
-                      {app.status === 'Under Review' && <button className="text-sm font-medium text-emerald-700" onClick={() => changeStatus(app, 'Approved')}>Approve</button>}
+                      {['Submitted', 'Under Review'].includes(app.status) && <button className="text-sm font-medium text-purple-700" onClick={() => changeStatus(app, 'Under Review')}>Start review</button>}
+                      {app.status === 'Under Review' && <button className="text-sm font-medium text-purple-700" onClick={() => changeStatus(app, 'Approved')}>Approve</button>}
                       {!['Approved', 'Rejected', 'Withdrawn'].includes(app.status) && <button className="text-sm font-medium text-rose-700" onClick={() => changeStatus(app, 'Rejected')}>Reject</button>}
                     </div>
                   </td>
@@ -1139,15 +1288,21 @@ function ApplicationsPage() {
             </tbody>
           </table>
         </div>
+        {applicationsPagination}
       </div>
       {applications.length === 0 && <EmptyState title="No applications match" description="Try another name or status filter." />}
       {selected && <DetailsDialog title={`Application ${selected.id}`} onClose={() => setSelected(null)}>
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <DetailItem label="Applicant" value={selected.name} />
           <DetailItem label="Status" value={selected.status} />
+          <DetailItem label="Birthdate" value={selected.birthdate || 'Not provided'} />
+          <DetailItem label="Phone" value={selected.phone || 'Not provided'} />
+          <DetailItem label="Current address" value={selected.current_address || 'Not provided'} />
+          <DetailItem label="Emergency contact" value={selected.emergency_contact_name ? `${selected.emergency_contact_name} · ${selected.emergency_contact_phone || ''}` : 'Not provided'} />
           <DetailItem label="Desired move-in" value={selected.desiredMoveInDate || 'Not provided'} />
           <DetailItem label="Employment status" value={selected.employmentStatus || 'Not provided'} />
           <DetailItem label="Monthly income" value={selected.monthlyIncome ? `$${selected.monthlyIncome}` : 'Not provided'} />
+          <DetailItem label="Listing" value={selected.propertyName ? `${selected.propertyName} · Unit ${selected.unitNumber || '—'}` : 'Legacy application'} />
           <DetailItem label="Reviewed at" value={selected.reviewedAt ? new Date(selected.reviewedAt).toLocaleString() : 'Not reviewed'} />
           <div className="sm:col-span-2"><DetailItem label="Notes" value={selected.additionalNotes || 'No notes provided'} /></div>
           <div className="sm:col-span-2">
@@ -1157,9 +1312,22 @@ function ApplicationsPage() {
                 <span className="text-slate-600">{document.name || document.path} · {document.type || 'other'}</span>
                 <div className="flex items-center gap-2">
                   <StatusBadge label={document.status === 'verified' ? 'Successful' : document.status === 'rejected' ? 'Rejected' : 'Pending'} />
-                  {document.status !== 'verified' && <button className="text-xs font-medium text-emerald-700" onClick={async () => {
+                  {document.document_source === 'tenant' && <button className="text-xs font-medium text-purple-700" onClick={async () => {
                     try {
-                  await api.patch(`/documents/${document.id}/verification`, { verification_status: 'verified' });
+                      const response = await api.get(`/tenant-documents/${document.id}/download`, { responseType: 'blob' });
+                      const url = URL.createObjectURL(response.data);
+                      const link = window.document.createElement('a');
+                      link.href = url;
+                      link.download = document.name;
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    } catch (error) {
+                      window.alert(error.message);
+                    }
+                  }}>Download</button>}
+                  {document.status !== 'verified' && <button className="text-xs font-medium text-purple-700" onClick={async () => {
+                    try {
+                  await api.patch(document.document_source === 'tenant' ? `/tenant-documents/${document.id}/verification` : `/documents/${document.id}/verification`, { verification_status: 'verified' });
                   const documents = selected.documents.map((item) => item.id === document.id ? { ...item, status: 'verified' } : item);
                   setSelected({ ...selected, documents });
                     } catch (error) {
@@ -1168,7 +1336,7 @@ function ApplicationsPage() {
                   }}>Verify</button>}
                   {document.status !== 'rejected' && <button className="text-xs font-medium text-rose-700" onClick={async () => {
                     try {
-                  await api.patch(`/documents/${document.id}/verification`, { verification_status: 'rejected' });
+                  await api.patch(document.document_source === 'tenant' ? `/tenant-documents/${document.id}/verification` : `/documents/${document.id}/verification`, { verification_status: 'rejected' });
                   const documents = selected.documents.map((item) => item.id === document.id ? { ...item, status: 'rejected' } : item);
                   setSelected({ ...selected, documents });
                     } catch (error) {
@@ -1187,84 +1355,319 @@ function ApplicationsPage() {
 
 function ScreeningPage() {
   const { data, refresh } = useWorkspace();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [selectedCriterion, setSelectedCriterion] = useState(null);
-  const activeApplications = data.applications.filter((application) => ['Submitted', 'Under Review'].includes(application.status));
-  const fields = [
+  const [criterionDialogOpen, setCriterionDialogOpen] = useState(false);
+  const [editingCriterion, setEditingCriterion] = useState(null);
+  const [evaluationApplication, setEvaluationApplication] = useState(null);
+  const [evaluation, setEvaluation] = useState(null);
+  const [evaluationDrafts, setEvaluationDrafts] = useState({});
+  const [evaluationLoading, setEvaluationLoading] = useState(false);
+  const [evaluationError, setEvaluationError] = useState('');
+  const [savingCriterion, setSavingCriterion] = useState(null);
+  const [query, setQuery] = useState('');
+  const [screeningFilter, setScreeningFilter] = useState('needs_screening');
+  const criterionFields = [
     { name: 'name', label: 'Criterion name', required: true },
     { name: 'description', label: 'Description', type: 'textarea' },
   ];
-  const evaluationFields = [
-    { name: 'applicationId', label: 'Applicant', type: 'select', options: activeApplications.map((item) => ({ value: item.id, label: `${item.name} (${item.id})` })), required: true },
-    { name: 'result', label: 'Evaluation result', type: 'select', options: ['passed', 'failed', 'not_applicable'], required: true },
-    { name: 'remarks', label: 'Reviewer remarks', type: 'textarea' },
-  ];
+  const activeCriteriaCount = data.criteria.filter((criterion) => criterion.active).length;
+  const { pageItems: pageCriteria, pagination: criteriaPagination } = usePagination(data.criteria);
+  const applications = data.applications.filter((application) => application.status !== 'Withdrawn');
+  const evaluationSummary = (applicationId) => {
+    const results = data.screenings.filter((screening) => Number(screening.applicationId) === Number(applicationId));
+    const inactiveHistoryCount = results.filter((result) => !result.criterionActive).length;
+    const total = activeCriteriaCount + inactiveHistoryCount;
+    const summary = { total, passed: 0, failed: 0, pending: 0, not_applicable: 0 };
+    results.forEach((result) => {
+      if (Object.hasOwn(summary, result.result)) summary[result.result] += 1;
+    });
+    const activeResultCount = results.filter((result) => result.criterionActive).length;
+    summary.pending += Math.max(0, activeCriteriaCount - activeResultCount);
+    const evaluated = summary.passed + summary.failed + summary.not_applicable;
+    summary.completionPercent = total ? Math.round((evaluated / total) * 100) : 0;
+    summary.status = results[0]?.screeningStatus || (results.length ? 'in_progress' : 'not_started');
+    return summary;
+  };
+  const visibleApplications = applications.filter((application) => {
+    const normalizedQuery = query.trim().toLowerCase();
+    const matchesQuery = !normalizedQuery
+      || application.name.toLowerCase().includes(normalizedQuery)
+      || String(application.id).toLowerCase().includes(normalizedQuery);
+    const summary = evaluationSummary(application.id);
+    const matchesFilter = screeningFilter === 'all'
+      || (screeningFilter === 'needs_screening' && ['Submitted', 'Under Review'].includes(application.status))
+      || summary.status === screeningFilter;
+    return matchesQuery && matchesFilter;
+  });
+  const { pageItems: pageApplications, pagination: applicationsPagination } = usePagination(visibleApplications, `${query}:${screeningFilter}`);
+  const openEvaluation = async (application) => {
+    setEvaluationApplication(application);
+    setEvaluation(null);
+    setEvaluationDrafts({});
+    setEvaluationError('');
+    setEvaluationLoading(true);
+    try {
+      const response = await api.post(`/applications/${application.id}/screening-evaluation`, {});
+      setEvaluation(response.data);
+      setEvaluationDrafts(Object.fromEntries(response.data.criteria.map((criterion) => [criterion.criteria_id, {
+        status: criterion.result_status || 'pending',
+        remarks: criterion.remarks || '',
+      }])));
+      refresh();
+    } catch (error) {
+      setEvaluationError(error.message || 'Unable to open this applicant evaluation.');
+    } finally {
+      setEvaluationLoading(false);
+    }
+  };
+  const saveEvaluation = async (criterion) => {
+    const draft = evaluationDrafts[criterion.criteria_id] || {};
+    setSavingCriterion(criterion.criteria_id);
+    setEvaluationError('');
+    try {
+      const response = await api.post(`/screenings/${evaluation.screening.screening_id}/results`, {
+        criteria_id: criterion.criteria_id,
+        result_status: draft.status || 'pending',
+        remarks: draft.remarks || '',
+      });
+      setEvaluation((current) => ({
+        ...current,
+        criteria: current.criteria.map((item) => item.criteria_id === criterion.criteria_id
+          ? { ...item, ...response.data }
+          : item),
+      }));
+      setEvaluationDrafts((current) => ({
+        ...current,
+        [criterion.criteria_id]: {
+          status: response.data.result_status,
+          remarks: response.data.remarks || '',
+        },
+      }));
+      refresh();
+    } catch (error) {
+      setEvaluationError(error.message || 'Unable to save this evaluation.');
+    } finally {
+      setSavingCriterion(null);
+    }
+  };
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Screening criteria" subtitle="Manage evaluation standards and review applicant compliance." action={<button className="primary-btn" onClick={() => setDialogOpen(true)}><Plus className="mr-2 h-4 w-4" /> Add criterion</button>} />
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {data.criteria.map((criterion) => (
-          <div key={criterion.id} className="panel p-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-semibold text-slate-900">{criterion.name}</h3>
-                <p className="mt-2 text-sm text-slate-600">{criterion.description}</p>
-              </div>
-              <button onClick={async () => {
-                try {
-                  await api.put(`/screening-criteria/${criterion.id}`, { is_active: !criterion.active });
-                  refresh();
-                } catch (error) {
-                  window.alert(error.message);
-                }
-              }} className={`status-badge ${criterion.active ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-100 text-slate-600'}`}>
-                {criterion.active ? 'Enabled' : 'Disabled'}
-              </button>
-            </div>
-            <div className="mt-5 flex items-center justify-between text-sm text-slate-600">
-              <span>Evaluation data</span>
-              <span className="font-semibold text-slate-900">Available per application</span>
-            </div>
-            <button className="primary-btn mt-5 w-full" disabled={!criterion.active || !activeApplications.length} title={!criterion.active ? 'Enable this criterion before evaluating applicants.' : !activeApplications.length ? 'There are no submitted applications to evaluate.' : undefined} onClick={() => setSelectedCriterion(criterion)}>Evaluate applicants</button>
-          </div>
-        ))}
-      </div>
-      {data.screenings.length > 0 && <div className="panel p-5">
-        <h3 className="text-lg font-semibold text-slate-900">Recent screening results</h3>
-        <div className="mt-4 divide-y divide-slate-200">
-          {data.screenings.map((screening) => <div key={screening.id} className="flex flex-col justify-between gap-2 py-3 sm:flex-row sm:items-center">
-            <div><p className="font-medium text-slate-900">{screening.applicantName} — {screening.criterionName}</p><p className="text-sm text-slate-500">{screening.remarks || 'No remarks'} · {new Date(screening.date).toLocaleString()}</p></div>
-            <StatusBadge label={screening.result.replace('_', ' ')} />
-          </div>)}
+      <PageHeader title="Tenant screening" subtitle="Manage screening standards and record a landlord-led evaluation for each rental application." action={<button className="primary-btn" onClick={() => { setEditingCriterion(null); setCriterionDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> Add criterion</button>} />
+
+      <section className="space-y-4">
+        <div className="flex flex-col gap-1">
+          <h2 className="text-lg font-semibold text-slate-900">Screening criteria</h2>
+          <p className="text-sm text-slate-500">Inactive criteria stay attached to existing evaluations. Criteria with evaluation history cannot be deleted.</p>
         </div>
-      </div>}
+        {data.criteria.length ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {pageCriteria.map((criterion) => (
+            <article key={criterion.id} className="panel flex flex-col p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold text-slate-900">{criterion.name}</h3>
+                  <p className="mt-2 whitespace-pre-line text-sm text-slate-600">{criterion.description || 'No description provided.'}</p>
+                </div>
+                <StatusBadge label={criterion.active ? 'Active' : 'Inactive'} />
+              </div>
+              <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+                <button className="secondary-btn !px-3 !py-2" onClick={() => { setEditingCriterion(criterion); setCriterionDialogOpen(true); }}><Pencil className="mr-1.5 h-4 w-4" /> Edit</button>
+                <button className="secondary-btn !px-3 !py-2" onClick={async () => {
+                  try {
+                    await api.put(`/screening-criteria/${criterion.id}`, { is_active: !criterion.active });
+                    refresh();
+                  } catch (error) {
+                    window.alert(error.message);
+                  }
+                }}>{criterion.active ? 'Deactivate' : 'Activate'}</button>
+                <button className="secondary-btn !px-3 !py-2 text-rose-700" aria-label={`Delete ${criterion.name}`} onClick={async () => {
+                  if (!window.confirm(`Delete “${criterion.name}”? Criteria with evaluation history cannot be deleted.`)) return;
+                  try {
+                    await api.delete(`/screening-criteria/${criterion.id}`);
+                    refresh();
+                  } catch (error) {
+                    window.alert(error.message);
+                  }
+                }}><Trash2 className="h-4 w-4" /></button>
+              </div>
+            </article>
+          ))}
+        </div> : <EmptyState title="No screening criteria" description="Default criteria will be created when your landlord workspace is initialized." />}
+        {criteriaPagination}
+      </section>
+
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Applicant evaluations</h2>
+          <p className="text-sm text-slate-500">Statuses record the landlord’s assessment; submitted documents do not automatically pass a criterion.</p>
+        </div>
+        <div className="panel overflow-hidden">
+          <div className="flex flex-col gap-3 border-b border-slate-200 p-4 sm:flex-row">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} className="field !rounded-lg pl-9" placeholder="Search applicant or application reference" />
+            </div>
+            <select className="field sm:max-w-56" value={screeningFilter} onChange={(event) => setScreeningFilter(event.target.value)} aria-label="Filter applicants by screening status">
+              <option value="needs_screening">Needs screening</option>
+              <option value="all">All applications</option>
+              <option value="not_started">Not started</option>
+              <option value="in_progress">In progress</option>
+              <option value="passed">Screening passed</option>
+              <option value="failed">Screening has failed criteria</option>
+            </select>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-slate-50 text-slate-500"><tr>
+                <th className="px-4 py-3">Applicant / reference</th>
+                <th className="px-4 py-3">Application status</th>
+                <th className="px-4 py-3">Screening progress</th>
+                <th className="px-4 py-3">Evaluation</th>
+              </tr></thead>
+              <tbody>
+                {pageApplications.map((application) => {
+                  const summary = evaluationSummary(application.id);
+                  return <tr key={application.id} className="border-t border-slate-200">
+                    <td className="px-4 py-3">
+                      <p className="font-medium text-slate-900">{application.name || 'Applicant'}</p>
+                      <p className="text-xs text-slate-500">Application #{application.id} · submitted {application.date || 'date unavailable'}</p>
+                    </td>
+                    <td className="px-4 py-3"><StatusBadge label={application.status} /></td>
+                    <td className="min-w-52 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3 text-xs text-slate-600">
+                        <span>{summary.completionPercent}% complete</span>
+                        <span>{summary.passed} passed · {summary.failed} failed · {summary.pending} pending · {summary.not_applicable} N/A</span>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${summary.completionPercent}%` }} />
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        <StatusBadge label={humanizeStatus(summary.status)} />
+                        <button className="text-sm font-semibold text-purple-700 hover:text-purple-800" onClick={() => openEvaluation(application)}>View evaluation</button>
+                      </div>
+                    </td>
+                  </tr>;
+                })}
+                {!visibleApplications.length && <tr><td className="px-4 py-8 text-center text-slate-500" colSpan={4}>No applications match this search and screening filter.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          {applicationsPagination}
+          <p className="border-t border-slate-100 px-4 py-3 text-xs text-slate-500">Property and unit are not linked to applications in the current application form, so they cannot be shown here.</p>
+        </div>
+      </section>
+
       <FormDialog
-        open={dialogOpen}
-        title="Add screening criterion"
-        fields={fields}
-        initialValues={{ name: '', description: '' }}
-        onClose={() => setDialogOpen(false)}
+        open={criterionDialogOpen}
+        title={editingCriterion ? 'Edit screening criterion' : 'Add screening criterion'}
+        fields={criterionFields}
+        initialValues={{ name: editingCriterion?.name || '', description: editingCriterion?.description || '' }}
+        onClose={() => { setCriterionDialogOpen(false); setEditingCriterion(null); }}
         onSubmit={async (values) => {
-          await api.post('/screening-criteria', {
-            criteria_name: values.name,
-            description: values.description,
-            is_active: true,
-          });
+          const payload = { criteria_name: values.name, description: values.description };
+          if (editingCriterion) {
+            await api.put(`/screening-criteria/${editingCriterion.id}`, payload);
+          } else {
+            await api.post('/screening-criteria', { ...payload, is_active: true });
+          }
           refresh();
-          setDialogOpen(false);
+          setCriterionDialogOpen(false);
+          setEditingCriterion(null);
         }}
       />
-      <FormDialog open={Boolean(selectedCriterion)} title={`Evaluate: ${selectedCriterion?.name || ''}`} fields={evaluationFields} initialValues={{ applicationId: activeApplications[0]?.id || '', result: 'passed', remarks: '' }} onClose={() => setSelectedCriterion(null)} onSubmit={async (values) => {
-        const screeningResponse = await api.post(`/applications/${values.applicationId}/screenings`, { remarks: values.remarks });
-        await api.post(`/screenings/${screeningResponse.data.screening_id}/results`, {
-          criteria_id: selectedCriterion.id,
-          result_status: values.result,
-          remarks: values.remarks,
-        });
-        refresh();
-        setSelectedCriterion(null);
-      }} />
+      {evaluationApplication && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-3 sm:p-5" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setEvaluationApplication(null);
+      }}>
+        <section role="dialog" aria-modal="true" aria-labelledby="evaluation-title" className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
+            <div>
+              <h2 id="evaluation-title" className="text-lg font-semibold text-slate-900">Applicant screening evaluation</h2>
+              <p className="mt-1 text-sm text-slate-500">{evaluationApplication.name} · Application #{evaluationApplication.id}</p>
+            </div>
+            <button aria-label="Close evaluation" onClick={() => setEvaluationApplication(null)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button>
+          </div>
+          <div className="space-y-5 overflow-y-auto p-5">
+            {evaluationLoading && <p role="status" className="text-sm text-slate-600">Loading applicant evaluation…</p>}
+            {evaluationError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{evaluationError}</p>}
+            {evaluation && <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <DetailItem label="Application status" value={humanizeStatus(evaluation.application.application_status)} />
+                <DetailItem label="Employment status" value={humanizeStatus(evaluation.application.employment_status) || 'Not provided'} />
+                <DetailItem label="Monthly income reported" value={evaluation.application.monthly_income ? `PHP ${Number(evaluation.application.monthly_income).toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : 'Not provided'} />
+                <DetailItem label="Screening completion" value={`${evaluation.summary.completion_percent}%`} />
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                {[
+                  ['Total criteria', evaluation.summary.total],
+                  ['Passed', evaluation.summary.passed],
+                  ['Failed', evaluation.summary.failed],
+                  ['Pending', evaluation.summary.pending],
+                  ['Not applicable', evaluation.summary.not_applicable],
+                ].map(([label, count]) => <div key={label} className="rounded-xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-xl font-semibold text-slate-900">{count}</p>
+                </div>)}
+              </div>
+              <div className="rounded-xl border border-slate-200 p-4">
+                <h3 className="font-semibold text-slate-900">Submitted supporting documents</h3>
+                <p className="mt-1 text-xs text-slate-500">Only document type and review metadata are shown here; file paths and document contents are not exposed.</p>
+                {evaluation.documents.length
+                  ? <ul className="mt-3 divide-y divide-slate-100">{evaluation.documents.map((document, index) => <li key={`${document.document_type}-${document.uploaded_at}-${index}`} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                    <span className="font-medium text-slate-800">{humanizeStatus(document.document_type)}</span>
+                    <span className="text-slate-500">{humanizeStatus(document.verification_status)} · {new Date(document.uploaded_at).toLocaleDateString()}</span>
+                  </li>)}</ul>
+                  : <p className="mt-3 text-sm text-slate-500">No supporting documents have been recorded.</p>}
+              </div>
+              {!['submitted', 'under_review'].includes(evaluation.application.application_status) && <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">This application has a final decision. Existing evaluation history is view-only.</p>}
+              <div className="space-y-3">
+                <h3 className="font-semibold text-slate-900">Criteria evaluation</h3>
+                {evaluation.criteria.map((criterion) => {
+                  const draft = evaluationDrafts[criterion.criteria_id] || { status: criterion.result_status || 'pending', remarks: criterion.remarks || '' };
+                  const editable = ['submitted', 'under_review'].includes(evaluation.application.application_status);
+                  return <article key={criterion.criteria_id} className="rounded-xl border border-slate-200 p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="font-semibold text-slate-900">{criterion.criteria_name}</h4>
+                          {!Number(criterion.is_active) && <StatusBadge label="Inactive" />}
+                        </div>
+                        <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{criterion.description || 'No description provided.'}</p>
+                        {criterion.verified_at && <p className="mt-2 text-xs text-slate-500">Evaluated {new Date(criterion.verified_at).toLocaleString()}{criterion.evaluated_by_name ? ` by ${criterion.evaluated_by_name}` : ''}</p>}
+                      </div>
+                      <label className="w-full text-sm md:w-52">
+                        <span className="label">Evaluation status</span>
+                        <select className="field" disabled={!editable} value={draft.status} onChange={(event) => setEvaluationDrafts((current) => ({
+                          ...current,
+                          [criterion.criteria_id]: { ...draft, status: event.target.value },
+                        }))}>
+                          <option value="pending">Pending</option>
+                          <option value="passed">Passed</option>
+                          <option value="failed">Failed</option>
+                          <option value="not_applicable">Not applicable</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="mt-3 block text-sm">
+                      <span className="label">Landlord remarks</span>
+                      <textarea className="field min-h-20" maxLength={5000} disabled={!editable} value={draft.remarks} onChange={(event) => setEvaluationDrafts((current) => ({
+                        ...current,
+                        [criterion.criteria_id]: { ...draft, remarks: event.target.value },
+                      }))} placeholder="Record the evidence reviewed and the reason for this status." />
+                    </label>
+                    {editable && <div className="mt-3 flex justify-end">
+                      <button className="primary-btn" disabled={savingCriterion === criterion.criteria_id} onClick={() => saveEvaluation(criterion)}>
+                        {savingCriterion === criterion.criteria_id ? 'Saving…' : 'Save evaluation'}
+                      </button>
+                    </div>}
+                  </article>;
+                })}
+              </div>
+              <p className="text-xs text-slate-500">Screening results do not approve or reject an application. Make the final decision separately in Applications.</p>
+            </>}
+          </div>
+          <div className="flex justify-end border-t border-slate-200 px-5 py-3"><button className="secondary-btn" onClick={() => setEvaluationApplication(null)}>Close</button></div>
+        </section>
+      </div>}
     </div>
   );
 }
@@ -1461,6 +1864,7 @@ function LeasesPage() {
     (statusFilter === 'all' || lease.status.toLowerCase() === statusFilter)
     && `${lease.id} ${lease.tenant} ${lease.unit}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const { pageItems: pageLeases, pagination: leasesPagination } = usePagination(visibleLeases, `${query}:${statusFilter}`);
 
   return (
     <div className="space-y-6">
@@ -1471,7 +1875,7 @@ function LeasesPage() {
         <select className="field" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All lease statuses</option>{['pending', 'active', 'ended', 'terminated', 'cancelled'].map((status) => <option key={status} value={status}>{status}</option>)}</select>
       </div>
       <div className="grid gap-4 xl:grid-cols-3">
-        {visibleLeases.map((lease) => (
+        {pageLeases.map((lease) => (
           <div key={lease.id} className="panel p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -1526,6 +1930,7 @@ function LeasesPage() {
           </div>
         ))}
       </div>
+      {leasesPagination}
       <FormDialog open={dialogOpen} title="Create lease" submitLabel="Create lease" sections={sections} initialValues={{ applicationId: eligibleApplications[0]?.id || '', coTenantIds: [], unitId: '', start: '', end: '', rent: '', securityDeposit: 0, advancePayment: 0, paymentDueDay: 5 }} onClose={() => setDialogOpen(false)} onSubmit={createLease} />
       <LeaseRecordsDialog lease={selectedLease} onClose={() => setSelectedLease(null)} />
     </div>
@@ -1602,7 +2007,7 @@ function LeaseRecordsDialog({ lease, onClose }) {
       <DetailsDialog title={`Lease records · ${lease.id}`} onClose={onClose}>
         <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-4">
           {[['deposit', 'Security deposit'], ['increases', 'Rent increases'], ['notices', 'Notices']].map(([value, label]) => (
-            <button key={value} className={tab === value ? 'status-badge border-emerald-200 bg-emerald-50 text-emerald-700' : 'status-badge border-slate-200 bg-white text-slate-600'} onClick={() => setTab(value)}>{label}</button>
+            <button key={value} className={tab === value ? 'status-badge border-purple-200 bg-purple-50 text-purple-700' : 'status-badge border-purple-100 bg-white text-slate-600'} onClick={() => setTab(value)}>{label}</button>
           ))}
         </div>
         {loadError && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{loadError}</p>}
@@ -1712,6 +2117,10 @@ function InvoicesPage() {
     (statusFilter === 'all' || invoice.status === statusFilter)
     && `${invoice.id || invoice.number} ${invoice.tenant} ${invoice.period}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const { pageItems: pageInvoices, pagination: invoicesPagination } = usePagination(visibleInvoices, `${query}:${statusFilter}`);
+  const { pageItems: pageAttempts, pagination: attemptsPagination } = usePagination(data.paymentAttempts);
+  const receipts = data.paymentHistory.filter((item) => item.receiptNumber);
+  const { pageItems: pageReceipts, pagination: receiptsPagination } = usePagination(receipts);
 
   return (
     <div className="space-y-6">
@@ -1735,7 +2144,7 @@ function InvoicesPage() {
               </tr>
             </thead>
             <tbody>
-              {visibleInvoices.map((invoice) => (
+              {pageInvoices.map((invoice) => (
                 <tr key={invoice.id || invoice.number} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-medium text-slate-900">{invoice.id || invoice.number}</td>
                   <td className="px-4 py-3 text-slate-600">{invoice.tenant}</td>
@@ -1761,13 +2170,14 @@ function InvoicesPage() {
             </tbody>
           </table>
         </div>
+        {invoicesPagination}
       </div>
       <div className="panel p-5">
         <h3 className="text-lg font-semibold text-slate-900">Payment attempts and verified receipts</h3>
         <p className="mt-1 text-sm text-slate-600">An attempt is not a payment. Cash and bank-transfer attempts require landlord confirmation; card and e-wallet verification require a configured gateway.</p>
         {data.paymentAttempts.length ? (
           <div className="mt-4 divide-y divide-slate-200">
-            {data.paymentAttempts.map((attempt) => (
+            {pageAttempts.map((attempt) => (
               <div key={attempt.id} className="flex flex-col justify-between gap-2 py-3 sm:flex-row sm:items-center">
                 <div><p className="font-medium text-slate-900">{attempt.id} · Invoice {attempt.invoiceId}</p><p className="text-sm text-slate-500">{attempt.paymentMethod?.replace('_', ' ') || 'Payment method'} · {new Date(attempt.initiatedAt).toLocaleString()}</p></div>
                 <div className="flex items-center gap-3"><span className="font-semibold text-slate-900">PHP {Number(attempt.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span><StatusBadge label={humanizeStatus(attempt.status)} />
@@ -1809,13 +2219,15 @@ function InvoicesPage() {
                 </div>
               </div>
             ))}
+            {attemptsPagination}
           </div>
         ) : <p className="mt-4 text-sm text-slate-500">No payment attempts recorded.</p>}
         <div className="mt-4 border-t border-slate-200 pt-4">
           <h4 className="font-medium text-slate-900">Receipts</h4>
-          {data.paymentHistory.filter((item) => item.receiptNumber).length
-            ? data.paymentHistory.filter((item) => item.receiptNumber).map((item) => <p key={item.id} className="mt-2 text-sm text-slate-600">{item.receiptNumber} · PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · Invoice {item.invoice_number} · Lease {item.lease_id} · {humanizeStatus(item.status)}</p>)
+          {receipts.length
+            ? pageReceipts.map((item) => <p key={item.id} className="mt-2 text-sm text-slate-600">{item.receiptNumber} · PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })} · Invoice {item.invoice_number} · Lease {item.lease_id} · {humanizeStatus(item.status)}</p>)
             : <p className="mt-1 text-sm text-slate-500">No confirmed payments have generated receipts.</p>}
+          {receiptsPagination}
         </div>
       </div>
       <FormDialog open={dialogOpen} title="Generate rent invoice" fields={fields} initialValues={{ leaseId: data.leases.find((item) => item.status === 'Active')?.id || '', periodStart: '', periodEnd: '', issueDate: new Date().toISOString().slice(0, 10), dueDate: '', amount: '' }} onClose={() => setDialogOpen(false)} onSubmit={async (values) => {
@@ -1865,6 +2277,7 @@ function ExpensesPage() {
     && (!fromDate || item.date >= fromDate)
     && (!toDate || item.date <= toDate),
   );
+  const { pageItems: pageExpenses, pagination: expensesPagination } = usePagination(visibleExpenses, `${category}:${propertyFilter}:${fromDate}:${toDate}`);
   const total = visibleExpenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
 
   return (
@@ -1902,7 +2315,7 @@ function ExpensesPage() {
               </tr>
             </thead>
             <tbody>
-              {visibleExpenses.map((expense) => (
+              {pageExpenses.map((expense) => (
                 <tr key={expense.id} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-medium text-slate-900">{expense.id}</td>
                   <td className="px-4 py-3 text-slate-600">{expense.category}</td>
@@ -1923,6 +2336,7 @@ function ExpensesPage() {
             </tbody>
           </table>
         </div>
+        {expensesPagination}
       </div>
       <FormDialog open={dialogOpen} title="Record property expense" fields={fields} initialValues={{ propertyId: data.properties[0]?.id || '', category: 'maintenance', description: '', amount: '', date: new Date().toISOString().slice(0, 10) }} onClose={() => setDialogOpen(false)} onSubmit={async (values) => {
         await api.post('/expenses', {
@@ -1947,6 +2361,7 @@ function MaintenancePage() {
     (statusFilter === 'all' || item.requestStatus === statusFilter)
     && (priorityFilter === 'all' || item.priority === priorityFilter),
   );
+  const { pageItems: pageRequests, pagination: requestsPagination } = usePagination(requests, `${statusFilter}:${priorityFilter}`);
   const nextStatus = { open: 'in_progress', in_progress: 'completed', completed: 'completed', cancelled: 'open' };
   const setMaintenanceStatus = async (request, requestStatus) => {
     try {
@@ -1986,7 +2401,7 @@ function MaintenancePage() {
               </tr>
             </thead>
             <tbody>
-              {requests.map((request) => (
+              {pageRequests.map((request) => (
                 <tr key={request.id} className="border-t border-slate-200">
                   <td className="px-4 py-3">
                     <div>
@@ -1998,14 +2413,15 @@ function MaintenancePage() {
                   <td className="px-4 py-3"><StatusBadge label={request.priority.charAt(0).toUpperCase() + request.priority.slice(1)} /></td>
                   <td className="px-4 py-3"><StatusBadge label={request.requestStatus === 'in_progress' ? 'In Progress' : request.requestStatus.charAt(0).toUpperCase() + request.requestStatus.slice(1)} /></td>
                   <td className="px-4 py-3">
-                    {request.requestStatus !== 'completed' && request.requestStatus !== 'cancelled' && <button className="text-sm font-medium text-emerald-700" onClick={() => setMaintenanceStatus(request, nextStatus[request.requestStatus])}>{request.requestStatus === 'open' ? 'Start work' : 'Complete'}</button>}
-                    {request.requestStatus === 'cancelled' && <button className="text-sm font-medium text-sky-700" onClick={() => setMaintenanceStatus(request, 'open')}>Reopen</button>}
+                    {request.requestStatus !== 'completed' && request.requestStatus !== 'cancelled' && <button className="text-sm font-medium text-purple-700" onClick={() => setMaintenanceStatus(request, nextStatus[request.requestStatus])}>{request.requestStatus === 'open' ? 'Start work' : 'Complete'}</button>}
+                    {request.requestStatus === 'cancelled' && <button className="text-sm font-medium text-purple-700" onClick={() => setMaintenanceStatus(request, 'open')}>Reopen</button>}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {requestsPagination}
       </div>
     </div>
   );
@@ -2014,13 +2430,14 @@ function MaintenancePage() {
 function NotificationsPage() {
   const { data, refresh } = useWorkspace();
   const unreadCount = data.notifications.filter((item) => !item.read).length;
+  const { pageItems: pageNotifications, pagination: notificationsPagination } = usePagination(data.notifications);
 
   return (
     <div className="space-y-6">
       <PageHeader title="Notifications" subtitle={`${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}; review lease reminders, payment alerts, and updates.`} />
       <div className="panel overflow-hidden">
         <div className="divide-y divide-slate-200">
-          {data.notifications.map((item) => (
+          {pageNotifications.map((item) => (
             <div key={item.id} className={`flex items-start justify-between gap-4 px-5 py-4 ${item.read ? 'bg-white' : 'bg-emerald-50/40'}`}>
               <div className="flex items-start gap-3">
                 <div className={`mt-1 h-2.5 w-2.5 rounded-full ${item.read ? 'bg-slate-300' : 'bg-emerald-500'}`} />
@@ -2038,11 +2455,12 @@ function NotificationsPage() {
                   } catch (error) {
                     window.alert(error.message);
                   }
-                }} className="font-medium text-emerald-700">Mark read</button>}
+                }} className="font-medium text-purple-700">Mark read</button>}
               </div>
             </div>
           ))}
         </div>
+        {notificationsPagination}
       </div>
     </div>
   );
@@ -2052,6 +2470,7 @@ function ActivityLogPage() {
   const { data } = useWorkspace();
   const [entityFilter, setEntityFilter] = useState('all');
   const visibleEvents = data.auditLog.filter((event) => entityFilter === 'all' || event.entityName === entityFilter);
+  const { pageItems: pageEvents, pagination: eventsPagination } = usePagination(visibleEvents, entityFilter);
   const entities = [...new Set(data.auditLog.map((event) => event.entityName))];
 
   return (
@@ -2067,20 +2486,21 @@ function ActivityLogPage() {
             <table className="min-w-full text-left text-sm">
               <thead className="bg-slate-50 text-slate-500"><tr><th className="px-4 py-3">Time</th><th className="px-4 py-3">Action</th><th className="px-4 py-3">Entity</th><th className="px-4 py-3">Record</th><th className="px-4 py-3">Details</th></tr></thead>
               <tbody>
-                {visibleEvents.map((event) => (
+                {pageEvents.map((event) => (
                   <tr key={event.id} className="border-t border-slate-200">
                     <td className="whitespace-nowrap px-4 py-3 text-slate-600">{new Date(event.createdAt).toLocaleString()}</td>
                     <td className="px-4 py-3"><StatusBadge label={event.action} /></td>
                     <td className="px-4 py-3 text-slate-700">{event.entityName}</td>
                     <td className="px-4 py-3 text-slate-600">{event.recordId || '—'}</td>
                     <td className="px-4 py-3">
-                      <details><summary className="cursor-pointer font-medium text-emerald-700">View payload</summary><pre className="mt-2 max-w-md overflow-auto rounded-lg bg-slate-50 p-2 text-xs text-slate-700">{JSON.stringify({ oldValues: event.oldValues, newValues: event.newValues }, null, 2)}</pre></details>
+                      <details><summary className="cursor-pointer font-medium text-purple-700">View payload</summary><pre className="mt-2 max-w-md overflow-auto rounded-lg bg-purple-50 p-2 text-xs text-slate-700">{JSON.stringify({ oldValues: event.oldValues, newValues: event.newValues }, null, 2)}</pre></details>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {eventsPagination}
         </div>
       ) : <EmptyState title="No activity yet" description="No backend audit records are available." />}
     </div>
@@ -2169,6 +2589,8 @@ function TenantDashboardPage() {
   const { user } = useAuth();
   const accountName = user?.name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.email || data.profile.name;
   const outstanding = data.tenantInvoices.filter((invoice) => ['unpaid', 'partially_paid', 'overdue'].includes(invoice.status)).reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0);
+  const { pageItems: pagePayments, pagination: paymentsPagination } = usePagination(data.paymentHistory);
+  const { pageItems: pageMaintenance, pagination: maintenancePagination } = usePagination(data.tenantMaintenance);
 
   return (
     <div className="space-y-6">
@@ -2184,7 +2606,7 @@ function TenantDashboardPage() {
         <div className="panel p-5">
           <h3 className="text-lg font-semibold text-slate-900">Recent payments</h3>
           <div className="mt-4 space-y-3">
-            {data.paymentHistory.map((item) => (
+            {pagePayments.map((item) => (
               <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-3">
                 <div>
                   <p className="font-medium text-slate-900">{item.id}</p>
@@ -2197,12 +2619,13 @@ function TenantDashboardPage() {
               </div>
             ))}
           </div>
+          {paymentsPagination}
         </div>
 
         <div className="panel p-5">
           <h3 className="text-lg font-semibold text-slate-900">Maintenance status</h3>
           <div className="mt-4 space-y-3">
-            {data.tenantMaintenance.map((item) => (
+            {pageMaintenance.map((item) => (
               <div key={item.id} className="rounded-xl border border-slate-200 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <p className="font-medium text-slate-900">{item.title}</p>
@@ -2215,6 +2638,7 @@ function TenantDashboardPage() {
               </div>
             ))}
           </div>
+          {maintenancePagination}
         </div>
       </div>
     </div>
@@ -2222,70 +2646,199 @@ function TenantDashboardPage() {
 }
 
 function TenantRentalsPage() {
-  const { data } = useWorkspace();
+  const { data, refresh } = useWorkspace();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [missingModalUnit, setMissingModalUnit] = useState(null);
+  const [missingItems, setMissingItems] = useState([]);
+  const [applyModalUnit, setApplyModalUnit] = useState(null);
+  const [moveInDate, setMoveInDate] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const { pageItems: pageUnits, pagination: unitsPagination } = usePagination(data.units);
+
+  const handleApplyClick = (unit) => {
+    const missing = getMissingTenantInfo(data.profile);
+    if (missing.length > 0) {
+      setMissingModalUnit(unit);
+      setMissingItems(missing);
+      return;
+    }
+    setApplyModalUnit(unit);
+    setMoveInDate('');
+    setSubmitError('');
+  };
+
+  const submitApplication = async (event) => {
+    event.preventDefault();
+    if (!applyModalUnit) return;
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      await api.post('/applications', {
+        unit_id: Number(applyModalUnit.id),
+        desired_move_in_date: moveInDate || null,
+      });
+      refresh();
+      setApplyModalUnit(null);
+      navigate(user?.role === 'tenant' ? '/tenant/applications' : '/applicant/applications');
+    } catch (err) {
+      setSubmitError(err.message || 'Unable to submit application.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
       <PageHeader title="Available rentals" subtitle="Browse vacant units, photos, and details from participating landlords." />
       {data.units.length ? (
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          {data.units.map((unit) => (
-            <article key={unit.id} className="panel overflow-hidden">
-              {unit.images?.length ? (
-                <div className="grid grid-cols-2 gap-1">
-                  {unit.images.map((image) => <img key={image.image_id} src={image.image_url} alt={`${unit.property} unit ${unit.unitNumber}`} className="h-40 w-full object-cover" />)}
+        <>
+          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {pageUnits.map((unit) => (
+              <article key={unit.id} className="panel flex flex-col overflow-hidden">
+                {unit.images?.length ? (
+                  <div className="grid grid-cols-2 gap-1">
+                    {unit.images.map((image) => <img key={image.image_id} src={image.image_url} alt={`${unit.property} unit ${unit.unitNumber}`} className="h-40 w-full object-cover" />)}
+                  </div>
+                ) : (
+                  <div className="flex h-40 items-center justify-center bg-purple-50 text-sm text-slate-500">No photos available</div>
+                )}
+                <div className="flex flex-1 flex-col p-5">
+                  <p className="text-xs uppercase tracking-[0.16em] text-purple-700">{unit.property}</p>
+                  <h2 className="mt-1 text-xl font-semibold text-slate-900">Unit {unit.unitNumber}</h2>
+                  {unit.address && <p className="mt-1 text-sm text-slate-500">{unit.address}</p>}
+                  <p className="mt-3 text-2xl font-bold text-slate-900">${unit.rent.toLocaleString()}<span className="text-sm font-normal text-slate-500"> / month</span></p>
+                  <div className="mt-3 flex gap-4 text-sm text-slate-600">
+                    <span>{unit.bedrooms} bed</span><span>{unit.bathrooms} bath</span>
+                    {unit.unitType && <span>{unit.unitType}</span>}
+                  </div>
+                  {unit.description && <p className="mt-4 whitespace-pre-line text-sm leading-6 text-slate-600">{unit.description}</p>}
+                  <div className="mt-auto pt-5">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyClick(unit)}
+                      className="primary-btn w-full"
+                    >
+                      Apply for this home
+                    </button>
+                  </div>
                 </div>
-              ) : (
-                <div className="flex h-40 items-center justify-center bg-slate-100 text-sm text-slate-500">No photos available</div>
-              )}
-              <div className="p-5">
-                <p className="text-xs uppercase tracking-[0.16em] text-emerald-700">{unit.property}</p>
-                <h2 className="mt-1 text-xl font-semibold text-slate-900">Unit {unit.unitNumber}</h2>
-                {unit.address && <p className="mt-1 text-sm text-slate-500">{unit.address}</p>}
-                <p className="mt-3 text-2xl font-bold text-slate-900">${unit.rent.toLocaleString()}<span className="text-sm font-normal text-slate-500"> / month</span></p>
-                <div className="mt-3 flex gap-4 text-sm text-slate-600">
-                  <span>{unit.bedrooms} bed</span><span>{unit.bathrooms} bath</span>
-                  {unit.unitType && <span>{unit.unitType}</span>}
-                </div>
-                {unit.description && <p className="mt-4 whitespace-pre-line text-sm leading-6 text-slate-600">{unit.description}</p>}
-              </div>
-            </article>
-          ))}
-        </div>
+              </article>
+            ))}
+          </div>
+          {unitsPagination}
+        </>
       ) : <EmptyState title="No available rentals" description="There are no vacant units listed right now. Check back later." />}
+
+      {missingModalUnit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="presentation" onMouseDown={(e) => {
+          if (e.target === e.currentTarget) setMissingModalUnit(null);
+        }}>
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl sm:p-7" role="dialog" aria-modal="true" aria-labelledby="missing-info-rentals">
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-600">
+                <AlertCircle className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 id="missing-info-rentals" className="text-lg font-bold text-slate-900">Missing information required</h3>
+                <p className="text-xs text-slate-500">{missingModalUnit.property} · Unit {missingModalUnit.unitNumber}</p>
+              </div>
+            </div>
+            <p className="mt-4 text-sm text-slate-600">
+              Before submitting an application for this home, please fill out your missing tenant information and upload required supporting documents.
+            </p>
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wider text-amber-800">Please provide the following:</p>
+              <ul className="mt-2.5 space-y-2">
+                {missingItems.map((item) => (
+                  <li key={item.id} className="flex items-center gap-2 text-sm text-amber-950">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-200/80 text-xs font-bold text-amber-800">!</span>
+                    <span>{item.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="mt-6 flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setMissingModalUnit(null)}
+                className="secondary-btn"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetId = missingModalUnit.id;
+                  setMissingModalUnit(null);
+                  const dest = user?.role === 'tenant' ? '/tenant/profile' : '/applicant/profile';
+                  navigate(`${dest}?unitId=${encodeURIComponent(targetId)}`);
+                }}
+                className="primary-btn inline-flex items-center gap-2"
+              >
+                Fill out <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {applyModalUnit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="presentation" onMouseDown={(e) => {
+          if (e.target === e.currentTarget) setApplyModalUnit(null);
+        }}>
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl sm:p-7" role="dialog" aria-modal="true" aria-labelledby="apply-unit-title">
+            <h3 id="apply-unit-title" className="text-xl font-bold text-slate-900">Send rental application</h3>
+            <p className="mt-1 text-sm text-slate-600">{applyModalUnit.property} · Unit {applyModalUnit.unitNumber} (${applyModalUnit.rent.toLocaleString()} / month)</p>
+            <form onSubmit={submitApplication} className="mt-5 space-y-4">
+              <div>
+                <label htmlFor="modal-move-in" className="label">Desired move-in date <span className="font-normal text-slate-400">(optional)</span></label>
+                <input
+                  id="modal-move-in"
+                  type="date"
+                  value={moveInDate}
+                  onChange={(e) => setMoveInDate(e.target.value)}
+                  className="field"
+                />
+              </div>
+              {submitError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{submitError}</div>}
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setApplyModalUnit(null)} className="secondary-btn">Cancel</button>
+                <button type="submit" disabled={submitting} className="primary-btn">
+                  {submitting ? 'Sending…' : 'Send application'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function TenantApplicationsPage() {
   const { data, refresh } = useWorkspace();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [message, setMessage] = useState('');
-  const fields = [
-    { name: 'landlordId', label: 'Landlord', type: 'select', options: data.landlords.map((item) => ({ value: item.id, label: item.label })), required: true },
-    { name: 'desiredMoveInDate', label: 'Desired move-in date', type: 'date', required: true },
-    { name: 'employmentStatus', label: 'Employment status', type: 'select', options: ['full_time', 'part_time', 'contract', 'self_employed', 'unemployed', 'other'], required: true },
-    { name: 'monthlyIncome', label: 'Monthly income', type: 'number', min: 0 },
-    { name: 'additionalNotes', label: 'Additional notes', type: 'textarea' },
-  ];
+  const { pageItems: pageApplications, pagination: applicationsPagination } = usePagination(data.applicationsForTenant);
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Rental application" subtitle="Submit a rental application to a landlord and track its status." action={<button className="primary-btn" disabled={!data.landlords.length} title={!data.landlords.length ? 'A landlord account must be available before applying.' : undefined} onClick={() => { setMessage(''); setDialogOpen(true); }}><Plus className="mr-2 h-4 w-4" /> New application</button>} />
-      {!data.landlords.length && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No landlords are available to apply to yet.</div>}
-      {message && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
+      <PageHeader title="My applications" subtitle="Track applications sent for specific rental listings." action={<NavLink className="primary-btn" to="/explore"><Search className="mr-2 h-4 w-4" /> Browse homes</NavLink>} />
+      <div className="rounded-xl border border-purple-200 bg-purple-50 p-4 text-sm text-purple-900">
+        <p className="font-semibold">Privacy notice</p>
+        <p className="mt-1">Your profile and uploaded documents are shared with a landlord when you apply to that landlord’s listing. Contact the property owner with questions about how application information is stored or retained.</p>
+      </div>
       <div className="panel overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-50 text-slate-500"><tr><th className="px-4 py-3">Application</th><th className="px-4 py-3">Move-in</th><th className="px-4 py-3">Employment</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Screening</th><th className="px-4 py-3">Action</th></tr></thead>
+            <thead className="bg-slate-50 text-slate-500"><tr><th className="px-4 py-3">Listing</th><th className="px-4 py-3">Submitted</th><th className="px-4 py-3">Desired move-in</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Action</th></tr></thead>
             <tbody>
-              {data.applicationsForTenant.length ? data.applicationsForTenant.map((item) => (
+              {data.applicationsForTenant.length ? pageApplications.map((item) => (
                 <tr key={item.id} className="border-t border-slate-200">
-                  <td className="px-4 py-3 font-medium text-slate-900">{item.id}</td>
+                  <td className="px-4 py-3"><p className="font-medium text-slate-900">{item.propertyName || 'Rental listing'}</p><p className="text-xs text-slate-500">Unit {item.unitNumber || '—'} · Application {item.id}</p></td>
+                  <td className="px-4 py-3 text-slate-600">{item.date}</td>
                   <td className="px-4 py-3 text-slate-600">{item.desiredMoveInDate}</td>
-                  <td className="px-4 py-3 text-slate-600">{item.employmentStatus}</td>
                   <td className="px-4 py-3"><StatusBadge label={humanizeStatus(item.status)} /></td>
-                  <td className="px-4 py-3 text-slate-600">{item.screeningStatus || 'Not started'}</td>
                   <td className="px-4 py-3">{item.status === 'submitted' && <button className="text-sm font-medium text-rose-700" onClick={async () => {
                     if (!window.confirm('Withdraw this application?')) return;
                     try {
@@ -2296,23 +2849,12 @@ function TenantApplicationsPage() {
                     }
                   }}>Withdraw</button>}</td>
                 </tr>
-              )) : <tr><td className="px-4 py-7 text-center text-slate-500" colSpan={6}>No applications yet. Submit a general application to get started.</td></tr>}
+              )) : <tr><td className="px-4 py-7 text-center text-slate-500" colSpan={5}>No applications yet. Browse available homes to get started.</td></tr>}
             </tbody>
           </table>
         </div>
+        {applicationsPagination}
       </div>
-      <FormDialog open={dialogOpen} title="Submit rental application" fields={fields} initialValues={{ landlordId: data.landlords[0]?.id || '', desiredMoveInDate: '', employmentStatus: 'full_time', monthlyIncome: '', additionalNotes: '' }} onClose={() => setDialogOpen(false)} onSubmit={async (values) => {
-        await api.post('/applications', {
-          landlord_id: Number(values.landlordId),
-          desired_move_in_date: values.desiredMoveInDate,
-          employment_status: values.employmentStatus,
-          monthly_income: Number(values.monthlyIncome || 0),
-          additional_notes: values.additionalNotes,
-        });
-        refresh();
-        setDialogOpen(false);
-        setMessage('Application submitted to the backend.');
-      }} />
     </div>
   );
 }
@@ -2357,6 +2899,7 @@ function TenantLeasePage() {
 function TenantInvoicesPage() {
   const { data } = useWorkspace();
   const navigate = useNavigate();
+  const { pageItems: pageInvoices, pagination: invoicesPagination } = usePagination(data.tenantInvoices);
 
   return (
     <div className="space-y-6">
@@ -2375,19 +2918,20 @@ function TenantInvoicesPage() {
               </tr>
             </thead>
             <tbody>
-              {data.tenantInvoices.map((invoice) => (
+              {pageInvoices.map((invoice) => (
                 <tr key={invoice.id} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-medium text-slate-900">{invoice.id}</td>
                   <td className="px-4 py-3 text-slate-600">{invoice.billingPeriod}</td>
                   <td className="px-4 py-3 text-slate-600">{invoice.dueDate}</td>
                   <td className="px-4 py-3 font-medium text-slate-900">${invoice.amount}</td>
                   <td className="px-4 py-3"><StatusBadge label={invoice.status === 'partially_paid' ? 'Partial' : invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)} /></td>
-                  <td className="px-4 py-3">{['unpaid', 'partially_paid', 'overdue'].includes(invoice.status) && <button className="text-sm font-medium text-emerald-700" onClick={() => navigate('/tenant/payments')}>Pay now</button>}</td>
+                  <td className="px-4 py-3">{['unpaid', 'partially_paid', 'overdue'].includes(invoice.status) && <button className="text-sm font-medium text-purple-700" onClick={() => navigate('/tenant/payments')}>Pay now</button>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {invoicesPagination}
       </div>
     </div>
   );
@@ -2395,9 +2939,31 @@ function TenantInvoicesPage() {
 
 function TenantPaymentsPage() {
   const { data, refresh } = useWorkspace();
-  const [selectedMethod, setSelectedMethod] = useState('bank_transfer');
+  const [selectedMethod, setSelectedMethod] = useState('card');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { pageItems: pageAttempts, pagination: attemptsPagination } = usePagination(data.paymentAttempts);
+
+  // If redirected back from HitPay with status
+  useEffect(() => {
+    const statusParam = searchParams.get('status');
+    if (statusParam) {
+      // Trigger status check on pending payment attempts
+      const pending = data.paymentAttempts.filter((a) => a.status === 'pending');
+      if (pending.length > 0) {
+        Promise.all(pending.map((p) => api.get(`/payments/${p.id}/status`)))
+          .then(() => refresh())
+          .catch(() => {});
+      } else {
+        refresh();
+      }
+      setMessage(statusParam === 'verify' ? 'Payment checkout completed! Verifying your payment status with HitPay…' : 'Returned from payment gateway.');
+      searchParams.delete('status');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams, data.paymentAttempts, refresh]);
+
   const invoiceBalance = (invoice) => {
     const paid = data.paymentHistory
       .filter((payment) => String(payment.invoice_id) === String(invoice.id) && ['completed', 'refunded'].includes(payment.status))
@@ -2407,25 +2973,29 @@ function TenantPaymentsPage() {
   const unpaidInvoice = data.tenantInvoices.find((invoice) => invoiceBalance(invoice) > 0);
   const pendingAttempt = unpaidInvoice && data.paymentAttempts.some((attempt) => String(attempt.invoiceId) === String(unpaidInvoice.id) && attempt.status === 'pending');
   const paymentMethodsInUi = [
-    { id: 'bank_transfer', label: 'Bank transfer', type: 'Not configured' },
-    { id: 'card', label: 'Card', type: 'Not configured' },
+    { id: 'card', label: 'HitPay Checkout (Card, GCash, QRPH, Maya)', type: 'HitPay Sandbox Live' },
+    { id: 'bank_transfer', label: 'Direct Bank Transfer', type: 'Manual Reference' },
   ];
   const startPayment = async () => {
     if (!unpaidInvoice || pendingAttempt || !selectedMethod) return;
     setBusy(true);
     setMessage('');
     try {
-      await api.post('/payments/initiate', {
+      const response = await api.post('/payments/initiate', {
         invoice_id: Number(unpaidInvoice.id),
         payment_method: selectedMethod,
-        gateway_name: 'manual',
-        gateway_reference: makeId('PAY'),
         amount: invoiceBalance(unpaidInvoice),
       });
       refresh();
-      setMessage('Payment attempt recorded as pending. No money was charged; configure a payment gateway to process real payments.');
+      const checkoutUrl = response.data?.checkout_url;
+      if (checkoutUrl) {
+        setMessage('Redirecting to HitPay secure checkout…');
+        window.location.href = checkoutUrl;
+      } else {
+        setMessage('Payment attempt recorded. Check the payment history below.');
+      }
     } catch (error) {
-      setMessage(error.message || 'Unable to record the payment attempt.');
+      setMessage(error.message || 'Unable to start payment.');
     } finally {
       setBusy(false);
     }
@@ -2433,48 +3003,83 @@ function TenantPaymentsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Payments" subtitle="Record a payment attempt against an unpaid invoice. A configured payment gateway is required to charge or verify real payments." action={<button className="primary-btn" disabled={!unpaidInvoice || pendingAttempt || busy} title={!unpaidInvoice ? 'There are no unpaid invoices to pay.' : pendingAttempt ? 'A payment attempt is already pending for this invoice.' : undefined} onClick={startPayment}>{busy ? 'Starting…' : pendingAttempt ? 'Payment pending' : unpaidInvoice ? `Record attempt — PHP ${invoiceBalance(unpaidInvoice).toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : 'No balance due'}</button>} />
-      {message && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{message}</div>}
+      <PageHeader
+        title="Payments"
+        subtitle="Pay active invoices online via HitPay (Card, GCash, QRPH) or record a manual transfer."
+        action={
+          <button
+            className="primary-btn"
+            disabled={!unpaidInvoice || pendingAttempt || busy}
+            title={!unpaidInvoice ? 'There are no unpaid invoices to pay.' : pendingAttempt ? 'A payment attempt is already pending for this invoice.' : undefined}
+            onClick={startPayment}
+          >
+            {busy ? 'Connecting to HitPay…' : pendingAttempt ? 'Payment pending' : unpaidInvoice ? `Pay Invoice — PHP ${invoiceBalance(unpaidInvoice).toLocaleString('en-PH', { minimumFractionDigits: 2 })}` : 'No balance due'}
+          </button>
+        }
+      />
+      {message && <div role="status" className="rounded-xl border border-purple-200 bg-purple-50 p-3 text-sm text-purple-900 font-medium">{message}</div>}
       <div className="grid gap-6 xl:grid-cols-[1fr_1.2fr]">
         <div className="panel p-5">
-          <h3 className="text-lg font-semibold text-slate-900">Payment method for the attempt</h3>
-          <p className="mt-1 text-sm text-slate-600">These choices record the selected method only; neither option is connected to a payment processor.</p>
+          <h3 className="text-lg font-semibold text-slate-900">Payment method</h3>
+          <p className="mt-1 text-sm text-slate-600">Choose how you want to settle your balance.</p>
           <div className="mt-4 space-y-3">
             {paymentMethodsInUi.map((method) => (
-              <button key={method.id} type="button" onClick={() => setSelectedMethod(method.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${selectedMethod === method.id ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
+              <button key={method.id} type="button" onClick={() => setSelectedMethod(method.id)} className={`flex w-full items-center justify-between rounded-xl border p-3.5 text-left transition ${selectedMethod === method.id ? 'border-purple-600 bg-purple-50/70 shadow-sm' : 'border-slate-200 bg-white hover:border-purple-200'}`}>
                 <div>
-                  <p className="font-medium text-slate-900">{method.label}</p>
-                  <p className="text-xs text-slate-500">{method.type}</p>
+                  <p className="font-semibold text-slate-900">{method.label}</p>
+                  <p className="text-xs text-purple-700 font-medium">{method.type}</p>
                 </div>
-                <span className="text-sm font-medium text-emerald-700">{selectedMethod === method.id ? 'Selected' : 'Select'}</span>
+                <span className={`text-xs font-bold rounded-full px-2.5 py-1 ${selectedMethod === method.id ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-600'}`}>{selectedMethod === method.id ? 'Selected' : 'Select'}</span>
               </button>
             ))}
           </div>
         </div>
 
         <div className="panel p-5">
-          <h3 className="text-lg font-semibold text-slate-900">Payment history</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-slate-900">Payment history</h3>
+            <button type="button" onClick={() => refresh()} className="text-xs font-semibold text-purple-700 hover:underline">Refresh status</button>
+          </div>
           <div className="mt-4 space-y-3">
-            {data.paymentAttempts.map((item) => (
-              <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3">
+            {pageAttempts.map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3.5">
                 <div>
-                  <p className="font-medium text-slate-900">Attempt {item.id} · Invoice {item.invoice_number || item.invoiceId}</p>
-                  <p className="text-xs text-slate-500">{item.method || item.paymentMethod?.replace('_', ' ')}</p>
+                  <p className="font-semibold text-slate-900">Attempt {item.id} · Invoice {item.invoice_number || item.invoiceId}</p>
+                  <p className="text-xs text-slate-500 capitalize">{item.gateway_name ? `${item.gateway_name} (${item.method || item.paymentMethod?.replace('_', ' ')})` : (item.method || item.paymentMethod?.replace('_', ' '))}</p>
+                  {item.gateway_reference && <p className="text-[11px] font-mono text-slate-400 truncate max-w-xs">{item.gateway_reference}</p>}
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold text-slate-900">PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
+                  <p className="font-bold text-slate-900">PHP {Number(item.amount).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</p>
                   <StatusBadge label={item.status === 'pending' ? 'Pending' : item.status} />
-                  {item.payment_status && <p className="mt-1 text-xs text-slate-500">Payment: {humanizeStatus(item.payment_status)}</p>}
-                  {item.status === 'pending' && <button className="mt-2 text-xs font-medium text-rose-700" onClick={async () => {
-                    if (!window.confirm(`Cancel pending payment attempt ${item.id}?`)) return;
-                    try {
-                      await api.post(`/payments/${item.id}/cancel`, {});
-                      refresh();
-                    } catch (error) {
-                      window.alert(error.message);
-                    }
-                  }}>Cancel attempt</button>}
-                  {item.receipt_number && <button className="mt-2 text-xs font-medium text-emerald-700" onClick={async () => {
+                  {item.payment_status && <p className="mt-1 text-xs text-emerald-700 font-medium">Payment: {humanizeStatus(item.payment_status)}</p>}
+                  {item.status === 'pending' && (
+                    <div className="mt-2 flex items-center justify-end gap-2">
+                      <button
+                        className="text-xs font-semibold text-purple-700 hover:underline"
+                        onClick={async () => {
+                          try {
+                            await api.get(`/payments/${item.id}/status`);
+                            refresh();
+                          } catch (err) {
+                            window.alert(err.message);
+                          }
+                        }}
+                      >
+                        Check HitPay
+                      </button>
+                      <span className="text-slate-300">·</span>
+                      <button className="text-xs font-medium text-rose-600 hover:underline" onClick={async () => {
+                        if (!window.confirm(`Cancel pending payment attempt ${item.id}?`)) return;
+                        try {
+                          await api.post(`/payments/${item.id}/cancel`, {});
+                          refresh();
+                        } catch (error) {
+                          window.alert(error.message);
+                        }
+                      }}>Cancel</button>
+                    </div>
+                  )}
+                  {item.receipt_number && <button className="mt-2 block text-xs font-semibold text-purple-700 hover:underline" onClick={async () => {
                     const popup = window.open('', '_blank');
                     if (!popup) {
                       window.alert('Allow pop-ups to print the receipt.');
@@ -2493,6 +3098,7 @@ function TenantPaymentsPage() {
             ))}
             {!data.paymentAttempts.length && <p className="text-sm text-slate-500">No payment attempts recorded.</p>}
           </div>
+          {attemptsPagination}
         </div>
       </div>
     </div>
@@ -2503,6 +3109,7 @@ function TenantMaintenancePage() {
   const { data, refresh } = useWorkspace();
   const [dialogOpen, setDialogOpen] = useState(false);
   const currentLease = data.leases.find((lease) => lease.tenant === data.profile.name && lease.status === 'Active');
+  const { pageItems: pageRequests, pagination: requestsPagination } = usePagination(data.tenantMaintenance);
   const fields = [
     { name: 'title', label: 'Request title', required: true },
     { name: 'description', label: 'Description', type: 'textarea', required: true },
@@ -2527,7 +3134,7 @@ function TenantMaintenancePage() {
               </tr>
             </thead>
             <tbody>
-              {data.tenantMaintenance.map((request) => (
+              {pageRequests.map((request) => (
                 <tr key={request.id} className="border-t border-slate-200">
                   <td className="px-4 py-3 font-medium text-slate-900">{request.id}</td>
                   <td className="px-4 py-3 text-slate-600">{request.title}</td>
@@ -2547,6 +3154,7 @@ function TenantMaintenancePage() {
             </tbody>
           </table>
         </div>
+        {requestsPagination}
       </div>
       <FormDialog open={dialogOpen} title="Submit maintenance request" fields={fields} initialValues={{ title: '', description: '', priority: 'normal' }} onClose={() => setDialogOpen(false)} onSubmit={async (values) => {
         if (!currentLease) throw new Error('An active tenant lease is required to submit a maintenance request.');
@@ -2565,12 +3173,13 @@ function TenantMaintenancePage() {
 
 function TenantNotificationsPage() {
   const { data, refresh } = useWorkspace();
+  const { pageItems: pageNotifications, pagination: notificationsPagination } = usePagination(data.notifications);
 
   return (
     <div className="space-y-6">
       <PageHeader title="Notifications" subtitle="See important personal updates and mark them as read when complete." />
       <div className="panel divide-y divide-slate-200 overflow-hidden">
-        {data.notifications.map((item) => (
+        {pageNotifications.map((item) => (
           <div key={item.id} className="flex items-start justify-between gap-4 px-5 py-4">
             <div>
               <p className="font-semibold text-slate-900">{item.title}</p>
@@ -2583,89 +3192,621 @@ function TenantNotificationsPage() {
               } catch (error) {
                 window.alert(error.message);
               }
-            }} className="text-sm font-medium text-emerald-700">Mark read</button>}
+            }} className="text-sm font-medium text-purple-700">Mark read</button>}
           </div>
         ))}
       </div>
+      {notificationsPagination}
+    </div>
+  );
+}
+
+function TenantProfilePage() {
+  const { data, setData, refresh } = useWorkspace();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const unitId = searchParams.get('unitId');
+  const justRegistered = searchParams.get('justRegistered');
+
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [uploadingType, setUploadingType] = useState(null);
+  const [uploadError, setUploadError] = useState('');
+  const [uploadSuccess, setUploadSuccess] = useState('');
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+
+  const [desiredMoveInDate, setDesiredMoveInDate] = useState('');
+  const [submittingApp, setSubmittingApp] = useState(false);
+  const [appError, setAppError] = useState('');
+
+  const [profile, setProfile] = useState(() => {
+    const parsedAddr = parseAddress(data.profile.currentAddress || '');
+    return {
+      firstName: data.profile.firstName || '',
+      middleName: data.profile.middleName || '',
+      lastName: data.profile.lastName || '',
+      birthdate: data.profile.birthdate || '',
+      email: data.profile.email || '',
+      phone: data.profile.phone || '',
+      country: parsedAddr.country || 'Philippines',
+      city: parsedAddr.city || '',
+      barangay: parsedAddr.barangay || '',
+      zipCode: parsedAddr.zipCode || '',
+      street: parsedAddr.street || '',
+      emergencyContactName: data.profile.emergencyContactName || '',
+      emergencyContactPhone: data.profile.emergencyContactPhone || '',
+      employmentStatus: data.profile.employmentStatus || 'full_time',
+      monthlyIncome: data.profile.monthlyIncome ?? '',
+    };
+  });
+
+  useEffect(() => {
+    const parsedAddr = parseAddress(data.profile.currentAddress || '');
+    setProfile({
+      firstName: data.profile.firstName || '',
+      middleName: data.profile.middleName || '',
+      lastName: data.profile.lastName || '',
+      birthdate: data.profile.birthdate || '',
+      email: data.profile.email || '',
+      phone: data.profile.phone || '',
+      country: parsedAddr.country || 'Philippines',
+      city: parsedAddr.city || '',
+      barangay: parsedAddr.barangay || '',
+      zipCode: parsedAddr.zipCode || '',
+      street: parsedAddr.street || '',
+      emergencyContactName: data.profile.emergencyContactName || '',
+      emergencyContactPhone: data.profile.emergencyContactPhone || '',
+      employmentStatus: data.profile.employmentStatus || 'full_time',
+      monthlyIncome: data.profile.monthlyIncome ?? '',
+    });
+  }, [data.profile]);
+
+  const currentAddressFormatted = useMemo(() => {
+    return formatAddress({
+      street: profile.street,
+      barangay: profile.barangay,
+      city: profile.city,
+      zipCode: profile.zipCode,
+      country: profile.country,
+    });
+  }, [profile.street, profile.barangay, profile.city, profile.zipCode, profile.country]);
+
+  const missingItems = useMemo(() => {
+    return getMissingTenantInfo({
+      ...data.profile,
+      ...profile,
+      currentAddress: currentAddressFormatted,
+      documents: data.profile.documents || [],
+    });
+  }, [data.profile, profile, currentAddressFormatted]);
+
+  const targetUnit = useMemo(() => {
+    if (!unitId) return null;
+    return data.units.find((u) => String(u.id) === String(unitId)) || null;
+  }, [unitId, data.units]);
+
+  const updateField = (event) => {
+    const { name, value } = event.target;
+    setProfile((current) => ({ ...current, [name]: value }));
+  };
+
+  const saveProfile = async (event) => {
+    if (event) event.preventDefault();
+    setSaveError('');
+    setSaved(false);
+    setSaving(true);
+    try {
+      const response = await api.patch('/profile', {
+        first_name: profile.firstName,
+        middle_name: profile.middleName,
+        last_name: profile.lastName,
+        birthdate: profile.birthdate,
+        phone: profile.phone,
+        current_address: currentAddressFormatted,
+        emergency_contact_name: profile.emergencyContactName,
+        emergency_contact_phone: profile.emergencyContactPhone,
+        employment_status: profile.employmentStatus,
+        monthly_income: profile.monthlyIncome,
+      });
+      const updatedUser = response.data?.user || {};
+      const parsedUpdatedAddr = parseAddress(updatedUser.current_address || currentAddressFormatted);
+      setData((current) => ({
+        ...current,
+        profile: {
+          ...current.profile,
+          ...updatedUser,
+          firstName: updatedUser.first_name || profile.firstName,
+          middleName: updatedUser.middle_name || profile.middleName,
+          lastName: updatedUser.last_name || profile.lastName,
+          name: updatedUser.name || [profile.firstName, profile.lastName].filter(Boolean).join(' '),
+          birthdate: updatedUser.birthdate || profile.birthdate,
+          phone: updatedUser.phone || profile.phone,
+          currentAddress: updatedUser.current_address || currentAddressFormatted,
+          emergencyContactName: updatedUser.emergency_contact_name || profile.emergencyContactName,
+          emergencyContactPhone: updatedUser.emergency_contact_phone || profile.emergencyContactPhone,
+          employmentStatus: updatedUser.employment_status || profile.employmentStatus,
+          monthlyIncome: updatedUser.monthly_income ?? profile.monthlyIncome,
+        },
+      }));
+      setProfile((current) => ({
+        ...current,
+        country: parsedUpdatedAddr.country || 'Philippines',
+        city: parsedUpdatedAddr.city || '',
+        barangay: parsedUpdatedAddr.barangay || '',
+        zipCode: parsedUpdatedAddr.zipCode || '',
+        street: parsedUpdatedAddr.street || '',
+      }));
+      refresh();
+      setSaved(true);
+    } catch (error) {
+      setSaveError(error.message || 'Unable to save profile details.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDocUpload = async (docType, file) => {
+    if (!file) return;
+    setUploadingType(docType);
+    setUploadError('');
+    setUploadSuccess('');
+    const formData = new FormData();
+    formData.append('document_type', docType);
+    formData.append('file', file);
+    try {
+      const response = await api.post('/tenant-documents', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      if (response.data?.documents) {
+        setData((current) => ({
+          ...current,
+          profile: {
+            ...current.profile,
+            documents: response.data.documents,
+          },
+        }));
+      }
+      refresh();
+      setUploadSuccess(`Document uploaded successfully.`);
+    } catch (err) {
+      setUploadError(err.message || 'Failed to upload document.');
+    } finally {
+      setUploadingType(null);
+    }
+  };
+
+  const handleDocDelete = async (documentId) => {
+    if (!window.confirm('Are you sure you want to remove this document?')) return;
+    setUploadError('');
+    setUploadSuccess('');
+    try {
+      const response = await api.delete(`/tenant-documents/${documentId}`);
+      if (response.data?.documents) {
+        setData((current) => ({
+          ...current,
+          profile: {
+            ...current.profile,
+            documents: response.data.documents,
+          },
+        }));
+      }
+      refresh();
+      setUploadSuccess('Document removed.');
+    } catch (err) {
+      setUploadError(err.message || 'Failed to remove document.');
+    }
+  };
+
+  const handleDocDownload = async (documentId, filename) => {
+    try {
+      const response = await api.get(`/tenant-documents/${documentId}/download`, {
+        responseType: 'blob',
+      });
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data], {
+        type: response.headers['content-type'] || 'application/octet-stream',
+      }));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename || 'document';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      window.alert(err.message || 'Unable to download document.');
+    }
+  };
+
+  const submitApplicationForUnit = async () => {
+    if (!unitId) return;
+    setAppError('');
+    setSubmittingApp(true);
+    try {
+      await api.post('/applications', {
+        unit_id: Number(unitId),
+        desired_move_in_date: desiredMoveInDate || null,
+      });
+      refresh();
+      navigate(user?.role === 'tenant' ? '/tenant/applications' : '/applicant/applications');
+    } catch (err) {
+      setAppError(err.message || 'Unable to send application.');
+    } finally {
+      setSubmittingApp(false);
+    }
+  };
+
+  const documentSlots = [
+    {
+      type: 'government_id',
+      title: 'Government-issued photo ID',
+      required: true,
+      description: 'Driver’s license, passport, or national identity card (PDF, JPG, PNG up to 10 MB).',
+    },
+    {
+      type: 'proof_of_income',
+      title: 'Proof of income',
+      required: true,
+      description: 'Recent pay stub, W-2 statement, bank statement, or employment letter (PDF, JPG, PNG up to 10 MB).',
+    },
+    {
+      type: 'reference_letter',
+      title: 'Rental history or reference letter',
+      required: false,
+      description: 'Reference letter from a previous landlord or rental history documentation (optional).',
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Profile & Documents"
+        subtitle="Manage your personal details, income info, and supporting documents for rental applications."
+      />
+
+      {unitId && (
+        <section aria-labelledby="unit-application-banner" className={`rounded-3xl border p-5 sm:p-6 shadow-sm ${missingItems.length ? 'border-amber-200 bg-amber-50/70' : 'border-emerald-200 bg-emerald-50/70'}`}>
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wider ${missingItems.length ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                  {missingItems.length ? <AlertCircle className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+                  {missingItems.length ? 'Action required to apply' : 'Ready to apply'}
+                </span>
+                <span className="text-xs text-slate-500">Unit ID: {unitId}</span>
+              </div>
+              <h3 id="unit-application-banner" className="text-xl font-bold text-slate-900">
+                {targetUnit ? `${targetUnit.property} · Unit ${targetUnit.unitNumber}` : 'Rental home application'}
+              </h3>
+              <p className="text-sm text-slate-600">
+                {missingItems.length
+                  ? 'Please complete the missing profile details and documents below to finish submitting your application.'
+                  : 'All requirements completed! Select your move-in date and send your application.'}
+              </p>
+            </div>
+            {targetUnit && (
+              <div className="text-right">
+                <p className="text-2xl font-bold text-slate-900">${targetUnit.rent.toLocaleString()}<span className="text-sm font-normal text-slate-500"> / mo</span></p>
+                <p className="text-xs text-slate-500">{targetUnit.bedrooms} bed · {targetUnit.bathrooms} bath</p>
+              </div>
+            )}
+          </div>
+
+          {missingItems.length > 0 ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-white/80 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wider text-amber-800">Remaining items required to apply:</p>
+              <ul className="mt-2 grid gap-1.5 sm:grid-cols-2 text-sm text-amber-950">
+                {missingItems.map((item) => (
+                  <li key={item.id} className="flex items-center gap-2">
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-200 text-xs font-bold text-amber-900">!</span>
+                    <span>{item.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-emerald-200 bg-white/90 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="target-move-in-date" className="text-xs font-semibold text-slate-700">Desired move-in date <span className="font-normal text-slate-400">(optional)</span></label>
+                <input
+                  id="target-move-in-date"
+                  type="date"
+                  value={desiredMoveInDate}
+                  onChange={(e) => setDesiredMoveInDate(e.target.value)}
+                  className="rounded-xl border border-slate-300 px-3 py-1.5 text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={submitApplicationForUnit}
+                disabled={submittingApp}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-purple-700 disabled:opacity-60"
+              >
+                {submittingApp ? 'Submitting application…' : 'Send application now'} <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
+          {appError && <p role="alert" className="mt-3 text-sm text-rose-700 font-medium">{appError}</p>}
+        </section>
+      )}
+
+      {justRegistered && !unitId && (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4 text-sm text-emerald-900">
+          <p className="font-semibold">Welcome to TenantFlow!</p>
+          <p className="mt-1 text-xs sm:text-sm">Your account has been created. Complete your tenant details and upload your supporting documents below so you can apply to rental listings in one click.</p>
+        </div>
+      )}
+
+      {!unitId && (
+        <div className={`panel p-5 ${missingItems.length ? 'border-amber-200 bg-gradient-to-r from-amber-50/50 to-white' : 'border-emerald-200 bg-gradient-to-r from-emerald-50/50 to-white'}`}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${missingItems.length ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                {missingItems.length ? <AlertCircle className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
+              </div>
+              <div>
+                <h3 className="font-semibold text-slate-900">
+                  {missingItems.length ? `Application readiness: ${missingItems.length} ${missingItems.length === 1 ? 'item' : 'items'} missing` : 'Application readiness: Profile complete!'}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {missingItems.length
+                    ? 'Fill out the missing details below to be eligible to apply for rental homes.'
+                    : 'You are eligible to send rental applications to any available home.'}
+                </p>
+              </div>
+            </div>
+            {!missingItems.length ? (
+              <NavLink to="/explore" className="primary-btn inline-flex items-center gap-2 text-xs">
+                Browse available homes <ArrowRight className="h-3.5 w-3.5" />
+              </NavLink>
+            ) : null}
+          </div>
+          {missingItems.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {missingItems.map((item) => (
+                <span key={item.id} className="inline-flex items-center gap-1 rounded-full bg-amber-100/80 px-2.5 py-1 text-xs font-medium text-amber-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  {item.label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="panel p-5 sm:p-6">
+        <div className="border-b border-slate-100 pb-4">
+          <h3 className="text-lg font-bold text-slate-900">Supporting documents</h3>
+          <p className="mt-1 text-sm text-slate-600">
+            Property owners review these documents when you submit an application. PDF, JPG, or PNG · up to 10 MB each.
+          </p>
+        </div>
+
+        {uploadError && <div role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{uploadError}</div>}
+        {uploadSuccess && <div role="status" className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{uploadSuccess}</div>}
+
+        <div className="mt-5 space-y-4">
+          {documentSlots.map((slot) => {
+            const existingDoc = (data.profile.documents || []).find((d) => d.document_type === slot.type);
+            const isUploading = uploadingType === slot.type;
+
+            return (
+              <div key={slot.type} className="flex flex-col justify-between gap-4 rounded-2xl border border-slate-200 p-4 transition-colors hover:border-slate-300 md:flex-row md:items-center">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-slate-500" />
+                    <span className="font-semibold text-slate-900">{slot.title}</span>
+                    {slot.required ? (
+                      <span className="rounded-md bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200">Required</span>
+                    ) : (
+                      <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Optional</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500">{slot.description}</p>
+                  {existingDoc && (
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-600">
+                      <span className="font-medium text-slate-800">{existingDoc.original_name}</span>
+                      <span>•</span>
+                      <span>{(existingDoc.file_size / 1024).toFixed(1)} KB</span>
+                      <span>•</span>
+                      <span>Uploaded {existingDoc.uploaded_at ? existingDoc.uploaded_at.slice(0, 10) : 'recently'}</span>
+                      <span className={`rounded-full px-2 py-0.5 font-medium ${existingDoc.verification_status === 'verified' ? 'bg-emerald-100 text-emerald-800' : existingDoc.verification_status === 'rejected' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'}`}>
+                        {existingDoc.verification_status === 'verified' ? 'Verified' : existingDoc.verification_status === 'rejected' ? 'Rejected' : 'Pending review'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {existingDoc ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleDocDownload(existingDoc.document_id, existingDoc.original_name)}
+                        className="secondary-btn inline-flex items-center gap-1.5 text-xs"
+                      >
+                        <Download className="h-3.5 w-3.5" /> Download
+                      </button>
+                      <label className="secondary-btn inline-flex cursor-pointer items-center gap-1.5 text-xs">
+                        <Upload className="h-3.5 w-3.5" /> Replace
+                        <input
+                          type="file"
+                          accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                          disabled={isUploading}
+                          onChange={(e) => handleDocUpload(slot.type, e.target.files?.[0])}
+                          className="sr-only"
+                        />
+                      </label>
+                      {!slot.required && (
+                        <button
+                          type="button"
+                          onClick={() => handleDocDelete(existingDoc.document_id)}
+                          className="rounded-xl border border-slate-200 p-2 text-rose-600 hover:bg-rose-50"
+                          title="Remove document"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <label className="primary-btn inline-flex cursor-pointer items-center gap-2 text-xs">
+                      {isUploading ? (
+                        <>
+                          <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          Uploading…
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="h-3.5 w-3.5" /> Upload document
+                        </>
+                      )}
+                      <input
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                        disabled={isUploading}
+                        onChange={(e) => handleDocUpload(slot.type, e.target.files?.[0])}
+                        className="sr-only"
+                      />
+                    </label>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <form onSubmit={saveProfile} className="space-y-6">
+        <div className="grid gap-6 xl:grid-cols-2">
+          <div className="panel p-5 sm:p-6 space-y-4">
+            <div className="border-b border-slate-100 pb-3">
+              <h3 className="text-lg font-bold text-slate-900">Personal information</h3>
+              <p className="text-xs text-slate-500">Your legal identity and contact details.</p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <label className="label" htmlFor="profile-first-name">First name <span className="text-rose-600">*</span></label>
+                <input id="profile-first-name" name="firstName" required className="field" value={profile.firstName} onChange={updateField} />
+              </div>
+              <div>
+                <label className="label" htmlFor="profile-middle-name">Middle name <span className="font-normal text-slate-400">(optional)</span></label>
+                <input id="profile-middle-name" name="middleName" className="field" value={profile.middleName} onChange={updateField} />
+              </div>
+              <div>
+                <label className="label" htmlFor="profile-last-name">Last name <span className="text-rose-600">*</span></label>
+                <input id="profile-last-name" name="lastName" required className="field" value={profile.lastName} onChange={updateField} />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="profile-email">Email <span className="font-normal text-slate-400">(account login)</span></label>
+                <input id="profile-email" type="email" className="field bg-slate-50" value={profile.email} readOnly />
+              </div>
+              <div>
+                <label className="label" htmlFor="profile-birthdate">Birthdate <span className="text-rose-600">*</span></label>
+                <input id="profile-birthdate" name="birthdate" type="date" required max={new Date().toISOString().slice(0, 10)} className="field" value={profile.birthdate} onChange={updateField} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="label" htmlFor="profile-phone">Phone number <span className="text-rose-600">*</span></label>
+                <input id="profile-phone" name="phone" type="tel" required className="field" value={profile.phone} onChange={updateField} />
+              </div>
+              <div className="sm:col-span-2">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-purple-700">Current address <span className="text-rose-600">*</span></p>
+                <PhilippineAddressFields
+                  idPrefix="profile-addr"
+                  required={true}
+                  values={{
+                    street: profile.street,
+                    barangay: profile.barangay,
+                    city: profile.city,
+                    zipCode: profile.zipCode,
+                    zip_code: profile.zipCode,
+                    country: profile.country,
+                  }}
+                  onChange={(updated) => {
+                    setProfile((prev) => ({
+                      ...prev,
+                      street: updated.street ?? prev.street,
+                      barangay: updated.barangay ?? prev.barangay,
+                      city: updated.city ?? prev.city,
+                      zipCode: updated.zipCode || updated.zip_code || prev.zipCode,
+                      country: updated.country ?? prev.country,
+                    }));
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="panel p-5 sm:p-6 space-y-4">
+              <div className="border-b border-slate-100 pb-3">
+                <h3 className="text-lg font-bold text-slate-900">Emergency contact</h3>
+                <p className="text-xs text-slate-500">Contact person in case of urgent rental matters.</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="label" htmlFor="profile-em-name">Contact name <span className="text-rose-600">*</span></label>
+                  <input id="profile-em-name" name="emergencyContactName" required className="field" value={profile.emergencyContactName} onChange={updateField} />
+                </div>
+                <div>
+                  <label className="label" htmlFor="profile-em-phone">Contact phone <span className="text-rose-600">*</span></label>
+                  <input id="profile-em-phone" name="emergencyContactPhone" type="tel" required className="field" value={profile.emergencyContactPhone} onChange={updateField} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {saveError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{saveError}</div>}
+        {saved && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700 font-medium">Profile details saved successfully.</div>}
+
+        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-5">
+          <button
+            type="submit"
+            disabled={saving}
+            className="primary-btn inline-flex items-center gap-2"
+          >
+            {saving ? 'Saving changes…' : 'Save profile details'}
+          </button>
+
+          <button
+            type="button"
+            className="secondary-btn text-xs"
+            onClick={() => setPasswordDialogOpen(true)}
+          >
+            Change account password
+          </button>
+        </div>
+      </form>
+
+      <FormDialog
+        open={passwordDialogOpen}
+        title="Change password"
+        fields={[
+          { name: 'currentPassword', label: 'Current password', type: 'password', required: true },
+          { name: 'newPassword', label: 'New password', type: 'password', minLength: 8, required: true },
+        ]}
+        initialValues={{ currentPassword: '', newPassword: '' }}
+        onClose={() => setPasswordDialogOpen(false)}
+        onSubmit={async (values) => {
+          await changePassword(values);
+          setPasswordDialogOpen(false);
+        }}
+      />
     </div>
   );
 }
 
 function TenantSettingsPage() {
-  const { data, setData, refresh } = useWorkspace();
-  const [saved, setSaved] = useState(false);
-  const [profile, setProfile] = useState(data.profile);
-  const [saveError, setSaveError] = useState('');
-  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
-  useEffect(() => setProfile(data.profile), [data.profile]);
-
-  const saveProfile = async (includeEmergency = false) => {
-    setSaveError('');
-    setSaved(false);
-    const body = {
-      name: profile.name,
-      phone: profile.phone,
-      current_address: profile.currentAddress,
-    };
-    if (includeEmergency) {
-      body.emergency_contact_name = profile.emergencyContactName;
-      body.emergency_contact_phone = profile.emergencyContactPhone;
-    }
-    try {
-      const response = await api.patch('/profile', body);
-      setData((current) => ({ ...current, profile: { ...current.profile, ...response.data.user } }));
-      refresh();
-      setSaved(true);
-    } catch (error) {
-      setSaveError(error.message || 'Unable to save profile.');
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <PageHeader title="Account settings" subtitle="Manage profile details, contact info, and your emergency contacts." />
-      <div className="grid gap-6 xl:grid-cols-2">
-        <div className="panel p-5">
-          <h3 className="text-lg font-semibold text-slate-900">Profile</h3>
-          <div className="mt-5 space-y-4">
-            <div><label className="label">Full name</label><input className="field" value={profile.name} onChange={(event) => setProfile((current) => ({ ...current, name: event.target.value }))} /></div>
-            <div><label className="label">Email</label><input className="field" type="email" value={profile.email} readOnly /></div>
-            <div><label className="label">Phone</label><input className="field" value={profile.phone} onChange={(event) => setProfile((current) => ({ ...current, phone: event.target.value }))} /></div>
-            <div><label className="label">Current address</label><input className="field" value={profile.currentAddress || ''} onChange={(event) => setProfile((current) => ({ ...current, currentAddress: event.target.value }))} /></div>
-          </div>
-          <button className="primary-btn mt-5" onClick={() => saveProfile(false)}>Save profile</button>
-          {saved && <p role="status" className="mt-3 text-sm text-emerald-700">Profile updated.</p>}
-          {saveError && <p role="alert" className="mt-3 text-sm text-rose-700">{saveError}</p>}
-        </div>
-
-        <div className="panel p-5">
-          <h3 className="text-lg font-semibold text-slate-900">Emergency contact</h3>
-          <div className="mt-5 space-y-4">
-            <div><label className="label">Contact name</label><input className="field" value={profile.emergencyContactName || ''} onChange={(event) => setProfile((current) => ({ ...current, emergencyContactName: event.target.value }))} /></div>
-            <div><label className="label">Contact phone</label><input className="field" value={profile.emergencyContactPhone || ''} onChange={(event) => setProfile((current) => ({ ...current, emergencyContactPhone: event.target.value }))} /></div>
-          </div>
-          <button className="primary-btn mt-5" onClick={() => saveProfile(true)}>Update contact</button>
-        </div>
-        <div className="panel p-5 xl:col-span-2">
-          <h3 className="text-lg font-semibold text-slate-900">Security</h3>
-          <p className="mt-2 text-sm text-slate-600">Password changes are handled by the authenticated backend and are never saved in browser preview state.</p>
-          <button className="secondary-btn mt-4" onClick={() => setPasswordDialogOpen(true)}>Change password</button>
-        </div>
-      </div>
-      <FormDialog open={passwordDialogOpen} title="Change password" fields={[
-        { name: 'currentPassword', label: 'Current password', type: 'password', required: true },
-        { name: 'newPassword', label: 'New password', type: 'password', minLength: 8, required: true },
-      ]} initialValues={{ currentPassword: '', newPassword: '' }} onClose={() => setPasswordDialogOpen(false)} onSubmit={async (values) => {
-        await changePassword(values);
-        setPasswordDialogOpen(false);
-      }} />
-    </div>
-  );
+  return <TenantProfilePage />;
 }
 
 function PreviewNotice({ loading, error }) {
   return (
-    <div className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-sm ${error ? 'border-rose-200 bg-rose-50 text-rose-900' : 'border-sky-200 bg-sky-50 text-sky-900'}`}>
+    <div className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-sm ${error ? 'border-rose-200 bg-rose-50 text-rose-900' : 'border-purple-200 bg-purple-50 text-purple-900'}`}>
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
       <p>{error
         ? <><strong>Backend data unavailable:</strong> {error}</>
@@ -2732,7 +3873,7 @@ function FormDialog({ open, title, submitLabel = 'Save', fields, sections, initi
             <div key={section.title || sectionIndex} className={section.title ? 'rounded-xl border border-slate-200 p-4' : ''}>
               {section.title && (
                 <div className="mb-4 border-b border-slate-100 pb-3">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700">Section {sectionIndex + 1}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-purple-700">Section {sectionIndex + 1}</p>
                   <h3 className="mt-1 font-semibold text-slate-900">{section.title}</h3>
                   {section.description && <p className="mt-1 text-sm text-slate-500">{section.description}</p>}
                 </div>
@@ -2763,7 +3904,7 @@ function FormDialog({ open, title, submitLabel = 'Save', fields, sections, initi
                         })}
                       </select>
                     ) : field.type === 'file' ? (
-                      <input id={`field-${field.name}`} type="file" accept={field.accept} multiple={field.multiple} className="field file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-50 file:px-3 file:py-1.5 file:font-semibold file:text-emerald-700" onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.files || []) }))} />
+                      <input id={`field-${field.name}`} type="file" accept={field.accept} multiple={field.multiple} className="field file:mr-3 file:rounded-lg file:border-0 file:bg-purple-50 file:px-3 file:py-1.5 file:font-semibold file:text-purple-700" onChange={(event) => setValues((current) => ({ ...current, [field.name]: Array.from(event.target.files || []) }))} />
                     ) : (
                       <input
                         id={`field-${field.name}`}
@@ -2841,23 +3982,15 @@ function PageHeader({ title, subtitle, action }) {
   );
 }
 
-function SummaryCard({ label, value, delta, tone = 'emerald' }) {
-  const toneStyles = {
-    emerald: 'border-emerald-100 bg-emerald-50',
-    sky: 'border-sky-100 bg-sky-50',
-    violet: 'border-violet-100 bg-violet-50',
-    amber: 'border-amber-100 bg-amber-50',
-    rose: 'border-rose-100 bg-rose-50',
-  };
-
+function SummaryCard({ label, value, delta }) {
   return (
-    <div className={`panel border p-4 ${toneStyles[tone] || toneStyles.emerald}`}>
+    <div className="panel border-purple-100 bg-white p-4">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{label}</p>
           <h3 className="mt-3 text-2xl font-bold text-slate-900">{value}</h3>
         </div>
-        <div className="rounded-xl bg-white p-2 text-emerald-600 shadow-sm"><ChevronRight className="h-4 w-4" /></div>
+        <div className="rounded-xl bg-purple-50 p-2 text-purple-700 shadow-sm"><ChevronRight className="h-4 w-4" /></div>
       </div>
       <p className="mt-3 text-xs text-slate-600">{delta}</p>
     </div>

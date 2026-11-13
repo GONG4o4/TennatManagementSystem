@@ -47,18 +47,41 @@ CREATE TABLE tenant (
     tenant_id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     user_id                  BIGINT UNSIGNED NULL,          -- NULL = tenant has no login yet
     first_name               VARCHAR(100)    NOT NULL,
+    middle_name              VARCHAR(100)    NULL,
     last_name                VARCHAR(100)    NOT NULL,
+    birthdate                DATE            NULL,
     email                    VARCHAR(255)    NULL,
     phone                    VARCHAR(30)     NULL,
     current_address          TEXT            NULL,
     emergency_contact_name   VARCHAR(150)    NULL,
     emergency_contact_phone  VARCHAR(30)     NULL,
+    employment_status        VARCHAR(30)     NULL,
+    monthly_income           DECIMAL(12,2)   NULL,
     created_at               DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenant_id),
     UNIQUE KEY tenant_user_uq (user_id),                    -- MySQL allows many NULLs in a UNIQUE column
     CONSTRAINT tenant_user_fk   FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE RESTRICT,
     CONSTRAINT tenant_first_chk CHECK (CHAR_LENGTH(TRIM(first_name)) > 0),
-    CONSTRAINT tenant_last_chk  CHECK (CHAR_LENGTH(TRIM(last_name))  > 0)
+    CONSTRAINT tenant_last_chk  CHECK (CHAR_LENGTH(TRIM(last_name))  > 0),
+    CONSTRAINT tenant_income_chk CHECK (monthly_income IS NULL OR monthly_income >= 0)
+) ENGINE=InnoDB;
+
+CREATE TABLE tenant_document (
+    document_id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tenant_id            BIGINT UNSIGNED NOT NULL,
+    document_type        VARCHAR(40)     NOT NULL,
+    file_path            VARCHAR(255)    NOT NULL,
+    original_name        VARCHAR(255)    NOT NULL,
+    content_type         VARCHAR(100)    NOT NULL,
+    file_size            INT UNSIGNED    NOT NULL,
+    verification_status  VARCHAR(20)     NOT NULL DEFAULT 'pending',
+    uploaded_at          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (document_id),
+    KEY idx_tenant_document_tenant (tenant_id),
+    CONSTRAINT tenant_document_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenant (tenant_id) ON DELETE CASCADE,
+    CONSTRAINT tenant_document_type_chk CHECK (document_type IN ('government_id', 'proof_of_income', 'reference_letter')),
+    CONSTRAINT tenant_document_status_chk CHECK (verification_status IN ('pending', 'verified', 'rejected')),
+    CONSTRAINT tenant_document_size_chk CHECK (file_size > 0)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -117,6 +140,23 @@ CREATE TABLE rental_unit_image (
     CONSTRAINT unit_image_unit_fk FOREIGN KEY (unit_id) REFERENCES rental_unit (unit_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE property_review (
+    review_id     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    property_id   BIGINT UNSIGNED NOT NULL,
+    tenant_id     BIGINT UNSIGNED NOT NULL,
+    rating        TINYINT UNSIGNED NOT NULL,
+    review_text   TEXT            NOT NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (review_id),
+    UNIQUE KEY property_review_once_uq (property_id, tenant_id),
+    KEY idx_property_review_property (property_id, created_at),
+    CONSTRAINT property_review_property_fk FOREIGN KEY (property_id) REFERENCES property (property_id) ON DELETE CASCADE,
+    CONSTRAINT property_review_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenant (tenant_id) ON DELETE CASCADE,
+    CONSTRAINT property_review_rating_chk CHECK (rating BETWEEN 1 AND 5),
+    CONSTRAINT property_review_text_chk CHECK (CHAR_LENGTH(TRIM(review_text)) > 0)
+) ENGINE=InnoDB;
+
 -- ---------------------------------------------------------------------
 -- APPLICATIONS & SCREENING
 -- ---------------------------------------------------------------------
@@ -124,6 +164,7 @@ CREATE TABLE tenant_application (
     application_id        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tenant_id             BIGINT UNSIGNED NOT NULL,
     landlord_id           BIGINT UNSIGNED NOT NULL,
+    unit_id               BIGINT UNSIGNED NULL,
     desired_move_in_date  DATE            NULL,
     employment_status     VARCHAR(30)     NULL,
     monthly_income        DECIMAL(12,2)   NULL,
@@ -134,8 +175,10 @@ CREATE TABLE tenant_application (
     PRIMARY KEY (application_id),
     KEY idx_app_tenant (tenant_id),
     KEY idx_app_landlord_status (landlord_id, application_status),
+    KEY idx_app_unit (unit_id),
     CONSTRAINT app_tenant_fk   FOREIGN KEY (tenant_id)  REFERENCES tenant   (tenant_id)   ON DELETE RESTRICT,
     CONSTRAINT app_landlord_fk FOREIGN KEY (landlord_id) REFERENCES landlord (landlord_id) ON DELETE RESTRICT,
+    CONSTRAINT app_unit_fk FOREIGN KEY (unit_id) REFERENCES rental_unit (unit_id) ON DELETE RESTRICT,
     CONSTRAINT app_status_chk   CHECK (application_status IN ('submitted', 'under_review', 'approved', 'rejected', 'withdrawn')),
     CONSTRAINT app_income_chk   CHECK (monthly_income IS NULL OR monthly_income >= 0),
     CONSTRAINT app_review_chk   CHECK (reviewed_at IS NULL OR reviewed_at >= application_date),
@@ -178,10 +221,20 @@ CREATE TABLE screening_criteria (
     criteria_name  VARCHAR(150)    NOT NULL,
     description    TEXT            NULL,
     is_active      BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (criteria_id),
     UNIQUE KEY criteria_name_uq (landlord_id, criteria_name),
     CONSTRAINT criteria_landlord_fk FOREIGN KEY (landlord_id) REFERENCES landlord (landlord_id) ON DELETE RESTRICT,
     CONSTRAINT criteria_name_chk CHECK (CHAR_LENGTH(TRIM(criteria_name)) > 0)
+) ENGINE=InnoDB;
+
+CREATE TABLE screening_criteria_defaults_initialized (
+    landlord_id BIGINT UNSIGNED NOT NULL,
+    initialized_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (landlord_id),
+    CONSTRAINT screening_defaults_landlord_fk
+        FOREIGN KEY (landlord_id) REFERENCES landlord (landlord_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE screening_result (
@@ -191,11 +244,16 @@ CREATE TABLE screening_result (
     result_status  VARCHAR(20)     NOT NULL DEFAULT 'pending',
     remarks        TEXT            NULL,
     verified_at    DATETIME        NULL,
+    evaluated_by   BIGINT UNSIGNED NULL,
+    created_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (result_id),
     UNIQUE KEY result_once_uq (screening_id, criteria_id),   -- one result per criterion per screening
     KEY idx_result_criteria (criteria_id),
+    KEY idx_result_evaluator (evaluated_by),
     CONSTRAINT result_screening_fk FOREIGN KEY (screening_id) REFERENCES screening (screening_id) ON DELETE CASCADE,
     CONSTRAINT result_criteria_fk  FOREIGN KEY (criteria_id)  REFERENCES screening_criteria (criteria_id) ON DELETE RESTRICT,
+    CONSTRAINT result_evaluator_fk FOREIGN KEY (evaluated_by) REFERENCES users (user_id) ON DELETE SET NULL,
     CONSTRAINT result_status_chk   CHECK (result_status IN ('pending', 'passed', 'failed', 'not_applicable')),
     CONSTRAINT result_verified_chk CHECK (result_status = 'pending' OR verified_at IS NOT NULL)
 ) ENGINE=InnoDB;

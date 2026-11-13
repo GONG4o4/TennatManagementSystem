@@ -6,6 +6,7 @@ require_once dirname(__DIR__) . '/config/bootstrap.php';
 require_once dirname(__DIR__) . '/config/database.php';
 require_once dirname(__DIR__) . '/middleware/auth.php';
 require_once dirname(__DIR__) . '/services/rentalCompliance.php';
+require_once dirname(__DIR__) . '/services/HitPayService.php';
 require_once dirname(__DIR__) . '/controllers/AuthController.php';
 require_once dirname(__DIR__) . '/controllers/ApiController.php';
 require_once dirname(__DIR__) . '/routes/api.php';
@@ -13,6 +14,10 @@ require_once dirname(__DIR__) . '/routes/api.php';
 $allowedOrigins = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5174',
+    'http://localhost:5175',
+    'http://127.0.0.1:5175',
 ];
 
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -49,6 +54,17 @@ try {
         strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET'),
         $requestPath,
     );
+    if (isset($result['file'])) {
+        $file = $result['file'];
+        $downloadName = str_replace(["\r", "\n"], '', (string) $file['original_name']);
+        header('Content-Type: ' . $file['content_type']);
+        header('Content-Length: ' . filesize($file['path']));
+        header("Content-Disposition: attachment; filename*=UTF-8''" . rawurlencode($downloadName));
+        header('Cache-Control: private, no-store');
+        header('X-Content-Type-Options: nosniff');
+        readfile($file['path']);
+        exit;
+    }
     jsonResponse($result['body'], $result['status']);
 } catch (ApiException $error) {
     jsonResponse(['message' => $error->getMessage()], $error->status);

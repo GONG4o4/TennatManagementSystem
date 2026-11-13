@@ -49,10 +49,10 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const register = async ({ name, email, password }) => {
+  const register = async (formData) => {
     setIsLoading(true);
     try {
-      return acceptSession(await registerRequest({ name, email, password }));
+      return acceptSession(await registerRequest(formData));
     } finally {
       setIsLoading(false);
     }

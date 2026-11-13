@@ -6,10 +6,12 @@ export const login = async ({ email, password }) => {
   return response.data;
 };
 
-// Required backend contract: POST /auth/register creates users + role profile,
-// hashes the password server-side, and returns { user, accessToken }.
-export const register = async ({ name, email, password }) => {
-  const response = await api.post('/auth/register', { name, email, password });
+// Required backend contract: POST /auth/register accepts renter details and
+// private document uploads, hashes the password server-side, and returns { user, accessToken }.
+export const register = async (formData) => {
+  const response = await api.post('/auth/register', formData, {
+    headers: { 'Content-Type': undefined },
+  });
   return response.data;
 };
 
